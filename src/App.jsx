@@ -3,7 +3,7 @@ import {
   LayoutDashboard, PackagePlus, Boxes, ClipboardCheck, Wrench,
   PackageSearch, Archive, History, AlertTriangle, CheckCircle2,
   Plus, Trash2, Search, RefreshCw, Loader2, FileSpreadsheet,
-  Download, Upload, FileDown, Printer, Settings, ShieldAlert
+  Download, Upload, FileDown, Printer, Settings, ShieldAlert, Layers
 } from "lucide-react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
@@ -481,6 +481,32 @@ export default function SalvadosApp() {
     showToast("Todos os dados foram apagados. Sistema pronto para lançamentos reais.");
   }
 
+  async function adicionarPecaAvulsa(form) {
+    const next = clone(db);
+    const pcId = "PC-" + pad4(next.contadores.pc + 1);
+    next.contadores.pc += 1;
+    next.pecasBoas = [
+      {
+        id: pcId,
+        produtoOrigemId: form.origem === "Compra Externa (reposição)" ? "Compra Externa" : "Avulso (já em estoque)",
+        ordemDesmontagemId: "",
+        descricao: form.descricao,
+        categoria: form.categoria,
+        condicao: form.condicao,
+        quantidade: parseInt(form.quantidade, 10) || 1,
+        destinoPrevisto: form.destinoPrevisto,
+        valorVenda: parseFloat(form.valorVenda) || 0,
+        status: "Disponível",
+        dataEntrada: todayStr(),
+        localizacao: form.localizacao || "",
+      },
+      ...next.pecasBoas,
+    ];
+    await persist(next);
+    showToast(`Peça ${pcId} adicionada ao estoque.`);
+    return pcId;
+  }
+
   if (loading) {
     return (
       <div className="loading-min-h flex items-center justify-center text-slate-500 gap-2">
@@ -492,6 +518,7 @@ export default function SalvadosApp() {
 
   const TABS = [
     { id: "painel", label: "Painel", icon: LayoutDashboard },
+    { id: "porlote", label: "Por Lote", icon: Layers },
     { id: "importar", label: "Importar Lote", icon: PackagePlus },
     { id: "dados", label: "Importar/Exportar CSV", icon: FileSpreadsheet },
     { id: "produtos", label: "Produtos", icon: Boxes },
@@ -561,6 +588,7 @@ export default function SalvadosApp() {
 
       <main className="p-4 max-w-6xl mx-auto pb-16">
         {tab === "painel" && <Painel db={db} />}
+        {tab === "porlote" && <PorLote db={db} />}
         {tab === "importar" && <ImportarLote onSubmit={processarLote} />}
         {tab === "dados" && <ImportarExportar db={db} onImportarCSV={processarLoteEmMassa} showToast={showToast} />}
         {tab === "produtos" && <Produtos db={db} />}
@@ -576,9 +604,9 @@ export default function SalvadosApp() {
             onRetestar={retestarProduto}
           />
         )}
-        {tab === "pecasboas" && <PecasBoas db={db} />}
+        {tab === "pecasboas" && <PecasBoas db={db} onAdicionarAvulsa={adicionarPecaAvulsa} />}
         {tab === "historico" && <Historico db={db} />}
-        {tab === "imprimir" && <Imprimir />}
+        {tab === "imprimir" && <Imprimir db={db} />}
         {tab === "config" && <Configuracoes db={db} onReset={zerarDados} />}
       </main>
 
@@ -619,6 +647,75 @@ function StatusBadge({ status }) {
 
 // ---------------- PAINEL ----------------
 
+// ---------------- GRÁFICO DE APROVEITAMENTO (compartilhado) ----------------
+
+const CATEGORIAS_APROVEITAMENTO = [
+  { chave: "recuperado", label: "Recuperado / Vendido", cor: "#0E7A40", statuses: ["Recuperado", "Vendido"] },
+  { chave: "andamento", label: "Em andamento (Sub-Conjunto, Reparo, Voltagem)", cor: "#B3730A", statuses: ["Sub-Conjunto (Aguardando Peça)", "Em Reparo", "Voltagem Divergente"] },
+  { chave: "desmontado", label: "Desmontado (virou peças)", cor: "#475569", statuses: ["Desmontado"] },
+  { chave: "descarte", label: "Descarte / Sucata", cor: "#B3241D", statuses: ["Descarte"] },
+  { chave: "aguardando", label: "Aguardando triagem/desmontagem", cor: "#94A3B8", statuses: ["Aguardando Teste", "Aguardando Desmontagem"] },
+];
+
+function calcularAproveitamento(produtos, pecasBoas) {
+  const total = produtos.length;
+  const contagem = CATEGORIAS_APROVEITAMENTO.map((cat) => {
+    const qtd = produtos.filter((p) => cat.statuses.includes(p.status)).length;
+    return { ...cat, qtd, pct: total > 0 ? (qtd / total) * 100 : 0 };
+  });
+  const idsDoConjunto = new Set(produtos.map((p) => p.id));
+  const pecasGeradas = pecasBoas.filter((pb) => idsDoConjunto.has(pb.produtoOrigemId)).length;
+  return { total, contagem, pecasGeradas };
+}
+
+function AproveitamentoChart({ produtos, pecasBoas, titulo, subtitulo }) {
+  const { total, contagem, pecasGeradas } = calcularAproveitamento(produtos, pecasBoas);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h2 className="font-semibold">{titulo}</h2>
+          {subtitulo && <p className="text-xs text-slate-500 mt-0.5">{subtitulo}</p>}
+        </div>
+        <div className="text-right">
+          <div className="text-2xl font-semibold">{total}</div>
+          <div className="text-xs text-slate-400">unidade(s) analisada(s)</div>
+        </div>
+      </div>
+
+      {total === 0 ? (
+        <div className="text-sm text-slate-400 py-6 text-center">Nenhum produto para analisar ainda.</div>
+      ) : (
+        <>
+          <div className="w-full h-7 rounded-full overflow-hidden flex border border-slate-200">
+            {contagem.filter((c) => c.qtd > 0).map((c) => (
+              <div key={c.chave} style={{ width: `${c.pct}%`, backgroundColor: c.cor }} title={`${c.label}: ${c.qtd} (${c.pct.toFixed(1)}%)`} />
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 mt-4">
+            {contagem.map((c) => (
+              <div key={c.chave} className="flex items-center justify-between text-sm">
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: c.cor }} />
+                  <span className="text-slate-600">{c.label}</span>
+                </div>
+                <span className="font-medium">{c.qtd} <span className="text-slate-400 font-normal">({c.pct.toFixed(1)}%)</span></span>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-sm">
+            <span className="text-slate-600">Peças boas geradas por desmontagem</span>
+            <span className="font-medium">{pecasGeradas}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Painel({ db }) {
   const total = db.produtos.length;
   const porStatus = {};
@@ -644,6 +741,21 @@ function Painel({ db }) {
         ))}
       </div>
 
+      <Card className="p-4 print-page">
+        <div className="flex items-center justify-between mb-1 no-print">
+          <div />
+          <button onClick={() => window.print()} className="text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5 hover:bg-slate-50">
+            <Printer size={13} /> Imprimir esta análise
+          </button>
+        </div>
+        <AproveitamentoChart
+          produtos={db.produtos}
+          pecasBoas={db.pecasBoas}
+          titulo="Aproveitamento geral"
+          subtitulo="Todos os produtos já triados, de todos os lotes"
+        />
+      </Card>
+
       <Card className="p-4">
         <div className="flex items-center gap-2 font-medium mb-3">
           <AlertTriangle size={16} className="text-amber-500" />
@@ -663,6 +775,153 @@ function Painel({ db }) {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ---------------- POR LOTE ----------------
+
+function PorLote({ db }) {
+  const lotesInfo = {};
+  db.produtos.forEach((p) => {
+    if (!lotesInfo[p.lote]) lotesInfo[p.lote] = { lote: p.lote, qtd: 0, dataEntrada: p.dataEntrada, fornecedor: p.fornecedor };
+    lotesInfo[p.lote].qtd += 1;
+  });
+  const listaLotes = Object.values(lotesInfo).sort((a, b) => (a.dataEntrada < b.dataEntrada ? 1 : -1));
+
+  const [busca, setBusca] = useState("");
+  const [loteSel, setLoteSel] = useState("");
+
+  const lotesFiltrados = busca.trim()
+    ? listaLotes.filter((l) => l.lote.toLowerCase().includes(busca.toLowerCase()))
+    : listaLotes;
+
+  const produtosDoLote = loteSel ? db.produtos.filter((p) => p.lote === loteSel) : [];
+  const idsDoLote = new Set(produtosDoLote.map((p) => p.id));
+  const historicoDoLote = db.historico.filter((h) => idsDoLote.has(h.idItem)).sort((a, b) => (a.dataHora < b.dataHora ? 1 : -1));
+  const pecasFaltantesDoLote = db.pecasFaltantes.filter((n) => idsDoLote.has(n.produtoId));
+
+  if (!loteSel) {
+    return (
+      <Card className="p-4">
+        <h2 className="font-semibold mb-1">Consultar por Lote</h2>
+        <p className="text-sm text-slate-500 mb-3">Selecione um lote para ver tudo o que já foi feito com ele e em que status cada unidade está.</p>
+        <div className="relative mb-3 max-w-sm">
+          <Search size={15} className="absolute left-2.5 top-2.5 text-slate-400" />
+          <input className={inputCls + " pl-8"} placeholder="Buscar Nº do lote..." value={busca} onChange={(e) => setBusca(e.target.value)} />
+        </div>
+        <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-[28rem] overflow-y-auto">
+          {lotesFiltrados.length === 0 && <div className="px-3 py-6 text-center text-sm text-slate-400">Nenhum lote encontrado.</div>}
+          {lotesFiltrados.map((l) => (
+            <button key={l.lote} onClick={() => setLoteSel(l.lote)} className="w-full text-left px-3 py-2.5 text-sm hover:bg-slate-50 flex items-center justify-between">
+              <span>
+                <span className="font-mono font-medium">{l.lote}</span>
+                <span className="text-slate-400 text-xs ml-2">{l.fornecedor}</span>
+              </span>
+              <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">{l.qtd} un.</span>
+            </button>
+          ))}
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <button onClick={() => setLoteSel("")} className="text-sm text-slate-500 hover:underline flex items-center gap-1">
+        ← Voltar para a lista de lotes
+      </button>
+
+      <Card className="p-4 print-page">
+        <div className="flex items-center justify-between mb-1 no-print">
+          <div />
+          <button onClick={() => window.print()} className="text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5 hover:bg-slate-50">
+            <Printer size={13} /> Imprimir esta análise
+          </button>
+        </div>
+        <AproveitamentoChart
+          produtos={produtosDoLote}
+          pecasBoas={db.pecasBoas}
+          titulo={`Aproveitamento do lote ${loteSel}`}
+          subtitulo={`Entrada: ${produtosDoLote[0]?.dataEntrada || "-"} · Fornecedor: ${produtosDoLote[0]?.fornecedor || "-"}`}
+        />
+      </Card>
+
+      <Card className="p-4">
+        <h2 className="font-semibold mb-3">Unidades do lote {loteSel}</h2>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-slate-500 border-b border-slate-200">
+                <th className="py-2 pr-3">ID Interno</th>
+                <th className="py-2 pr-3">SKU</th>
+                <th className="py-2 pr-3">Descrição</th>
+                <th className="py-2 pr-3">Status</th>
+                <th className="py-2 pr-3">Estoque Atual</th>
+                <th className="py-2 pr-3">Técnico</th>
+              </tr>
+            </thead>
+            <tbody>
+              {produtosDoLote.map((p) => (
+                <tr key={p.id} className="border-b border-slate-100 last:border-0">
+                  <td className="py-2 pr-3 font-mono text-xs">{p.id}</td>
+                  <td className="py-2 pr-3">{p.codigoFornecedor}</td>
+                  <td className="py-2 pr-3">{p.descricao}</td>
+                  <td className="py-2 pr-3"><StatusBadge status={p.status} /></td>
+                  <td className="py-2 pr-3 text-slate-500">{p.estoqueAtual}</td>
+                  <td className="py-2 pr-3 text-slate-500">{p.tecnico || "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {pecasFaltantesDoLote.length > 0 && (
+        <Card className="p-4">
+          <h2 className="font-semibold mb-3">Peças/ajustes pendentes deste lote</h2>
+          <div className="space-y-2">
+            {pecasFaltantesDoLote.map((n) => (
+              <div key={n.id} className="flex items-center justify-between text-sm border-b border-slate-100 pb-2 last:border-0">
+                <div><span className="font-medium">{n.produtoId}</span> — {n.peca}</div>
+                <StatusBadge status={n.status === "Aplicado" ? "Recuperado" : "Sub-Conjunto (Aguardando Peça)"} />
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      <Card className="p-4">
+        <h2 className="font-semibold mb-3">Histórico de movimentações do lote</h2>
+        {historicoDoLote.length === 0 ? (
+          <div className="text-sm text-slate-400">Nenhuma movimentação registrada ainda para este lote.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-slate-500 border-b border-slate-200">
+                  <th className="py-2 pr-3">Data/Hora</th>
+                  <th className="py-2 pr-3">Item</th>
+                  <th className="py-2 pr-3">De → Para</th>
+                  <th className="py-2 pr-3">Responsável</th>
+                  <th className="py-2 pr-3">Motivo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {historicoDoLote.map((h) => (
+                  <tr key={h.id} className="border-b border-slate-100 last:border-0">
+                    <td className="py-2 pr-3 whitespace-nowrap text-slate-500">{h.dataHora}</td>
+                    <td className="py-2 pr-3 font-mono text-xs">{h.idItem}</td>
+                    <td className="py-2 pr-3 whitespace-nowrap">{h.statusAnterior} → <strong>{h.statusNovo}</strong></td>
+                    <td className="py-2 pr-3">{h.responsavel}</td>
+                    <td className="py-2 pr-3 text-slate-500">{h.motivo}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </Card>
@@ -1596,47 +1855,123 @@ function RetesteRow({ produto, onRetestar }) {
 
 // ---------------- PEÇAS BOAS ----------------
 
-function PecasBoas({ db }) {
+function PecasBoas({ db, onAdicionarAvulsa }) {
   const [busca, setBusca] = useState("");
+  const [mostrarForm, setMostrarForm] = useState(false);
+  const [salvando, setSalvando] = useState(false);
+  const [confirmacao, setConfirmacao] = useState(null);
+  const formVazio = {
+    descricao: "", categoria: "", condicao: "Testada OK", quantidade: 1,
+    origem: "Avulso (já em estoque)", destinoPrevisto: "Uso Interno",
+    valorVenda: "", localizacao: "",
+  };
+  const [form, setForm] = useState(formVazio);
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+
   const filtradas = db.pecasBoas.filter((p) => !busca || p.descricao.toLowerCase().includes(busca.toLowerCase()) || p.id.toLowerCase().includes(busca.toLowerCase()));
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!form.descricao) return;
+    setSalvando(true);
+    const pcId = await onAdicionarAvulsa(form);
+    setSalvando(false);
+    setConfirmacao(`Peça ${pcId} adicionada com sucesso.`);
+    setForm(formVazio);
+    setMostrarForm(false);
+  }
+
   return (
-    <Card className="p-4">
-      <div className="relative mb-3 max-w-sm">
-        <Search size={15} className="absolute left-2.5 top-2.5 text-slate-400" />
-        <input className={inputCls + " pl-8"} placeholder="Buscar peça..." value={busca} onChange={(e) => setBusca(e.target.value)} />
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-xs text-slate-500 border-b border-slate-200">
-              <th className="py-2 pr-3">ID Peça</th>
-              <th className="py-2 pr-3">Descrição</th>
-              <th className="py-2 pr-3">Origem</th>
-              <th className="py-2 pr-3">Condição</th>
-              <th className="py-2 pr-3">Qtd.</th>
-              <th className="py-2 pr-3">Destino Previsto</th>
-              <th className="py-2 pr-3">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtradas.map((p) => (
-              <tr key={p.id} className="border-b border-slate-100 last:border-0">
-                <td className="py-2 pr-3 font-mono text-xs">{p.id}</td>
-                <td className="py-2 pr-3">{p.descricao}</td>
-                <td className="py-2 pr-3 font-mono text-xs text-slate-400">{p.produtoOrigemId}</td>
-                <td className="py-2 pr-3">{p.condicao}</td>
-                <td className="py-2 pr-3">{p.quantidade}</td>
-                <td className="py-2 pr-3">{p.destinoPrevisto}</td>
-                <td className="py-2 pr-3"><StatusBadge status={p.status} /></td>
+    <div className="space-y-4">
+      <Card className="p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <div className="relative max-w-sm flex-1">
+            <Search size={15} className="absolute left-2.5 top-2.5 text-slate-400" />
+            <input className={inputCls + " pl-8"} placeholder="Buscar peça..." value={busca} onChange={(e) => setBusca(e.target.value)} />
+          </div>
+          <button onClick={() => { setMostrarForm(!mostrarForm); setConfirmacao(null); }} className="text-sm brand-btn rounded-lg px-3 py-2 flex items-center gap-1.5">
+            <Plus size={15} /> Adicionar peça/sub-conjunto avulso
+          </button>
+        </div>
+
+        {confirmacao && (
+          <div className="border border-emerald-300 bg-emerald-50 rounded-lg p-3 mb-3 flex items-center gap-2 text-sm text-emerald-800">
+            <CheckCircle2 size={16} /> {confirmacao}
+          </div>
+        )}
+
+        {mostrarForm && (
+          <form onSubmit={submit} className="border border-slate-200 rounded-lg p-4 mb-4 grid grid-cols-2 gap-3">
+            <div className="col-span-2 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+              Use isto para peças que você já tem fisicamente mas não estavam no sistema, ou peças/sub-conjuntos comprados para repor estoque (sem vir de uma desmontagem específica).
+            </div>
+            <div className="col-span-2">
+              <Field label="Descrição da Peça/Sub-Conjunto"><input className={inputCls} value={form.descricao} onChange={set("descricao")} required placeholder="Ex: Motor 220V, Placa eletrônica, Resistência..." /></Field>
+            </div>
+            <Field label="Categoria"><input className={inputCls} value={form.categoria} onChange={set("categoria")} placeholder="Ex: Motor, Placa, Estrutura..." /></Field>
+            <Field label="Quantidade"><input type="number" min="1" className={inputCls} value={form.quantidade} onChange={set("quantidade")} /></Field>
+            <Field label="Condição">
+              <select className={inputCls} value={form.condicao} onChange={set("condicao")}>
+                <option>Nova</option><option>Seminova</option><option>Testada OK</option>
+              </select>
+            </Field>
+            <Field label="Origem">
+              <select className={inputCls} value={form.origem} onChange={set("origem")}>
+                <option>Avulso (já em estoque)</option>
+                <option>Compra Externa (reposição)</option>
+              </select>
+            </Field>
+            <Field label="Destino Previsto">
+              <select className={inputCls} value={form.destinoPrevisto} onChange={set("destinoPrevisto")}>
+                <option>Uso Interno</option><option>Venda Loja Física</option><option>Venda Loja Virtual</option>
+              </select>
+            </Field>
+            <Field label="Valor de Venda (R$, opcional)"><input type="number" step="0.01" className={inputCls} value={form.valorVenda} onChange={set("valorVenda")} /></Field>
+            <div className="col-span-2">
+              <Field label="Localização no estoque (opcional)"><input className={inputCls} value={form.localizacao} onChange={set("localizacao")} placeholder="Ex: Prateleira B12" /></Field>
+            </div>
+            <div className="col-span-2 flex gap-2">
+              <button type="submit" disabled={salvando} className="brand-btn rounded-lg px-4 py-2.5 text-sm font-medium disabled:opacity-60 flex items-center gap-1.5">
+                {salvando ? <><Loader2 size={15} className="animate-spin" /> Salvando...</> : <>💾 Adicionar ao Estoque</>}
+              </button>
+              <button type="button" onClick={() => setMostrarForm(false)} className="text-sm border border-slate-300 rounded-lg px-4 py-2.5 hover:bg-slate-50">Cancelar</button>
+            </div>
+          </form>
+        )}
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-slate-500 border-b border-slate-200">
+                <th className="py-2 pr-3">ID Peça</th>
+                <th className="py-2 pr-3">Descrição</th>
+                <th className="py-2 pr-3">Origem</th>
+                <th className="py-2 pr-3">Condição</th>
+                <th className="py-2 pr-3">Qtd.</th>
+                <th className="py-2 pr-3">Destino Previsto</th>
+                <th className="py-2 pr-3">Status</th>
               </tr>
-            ))}
-            {filtradas.length === 0 && (
-              <tr><td colSpan={7} className="py-8 text-center text-slate-400">Nenhuma peça no estoque ainda.</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </Card>
+            </thead>
+            <tbody>
+              {filtradas.map((p) => (
+                <tr key={p.id} className="border-b border-slate-100 last:border-0">
+                  <td className="py-2 pr-3 font-mono text-xs">{p.id}</td>
+                  <td className="py-2 pr-3">{p.descricao}</td>
+                  <td className="py-2 pr-3 font-mono text-xs text-slate-400">{p.produtoOrigemId}</td>
+                  <td className="py-2 pr-3">{p.condicao}</td>
+                  <td className="py-2 pr-3">{p.quantidade}</td>
+                  <td className="py-2 pr-3">{p.destinoPrevisto}</td>
+                  <td className="py-2 pr-3"><StatusBadge status={p.status} /></td>
+                </tr>
+              ))}
+              {filtradas.length === 0 && (
+                <tr><td colSpan={7} className="py-8 text-center text-slate-400">Nenhuma peça no estoque ainda.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
   );
 }
 
@@ -1824,18 +2159,113 @@ function gerarHtmlImpressao(tipo) {
   return `<html><head><title>${titulo}</title><style>${style}</style></head><body>${corpo}</body></html>`;
 }
 
-function Imprimir() {
+function agruparRecuperados(produtos) {
+  const grupos = {};
+  produtos.filter((p) => p.status === "Recuperado").forEach((p) => {
+    const key = p.codigoFornecedor + "|" + p.descricao;
+    if (!grupos[key]) grupos[key] = { codigoFornecedor: p.codigoFornecedor, descricao: p.descricao, quantidade: 0, valorTotal: 0 };
+    grupos[key].quantidade += 1;
+    grupos[key].valorTotal += (p.valorVenda || 0);
+  });
+  return Object.values(grupos)
+    .map((g) => ({ ...g, valorUnitMedio: g.quantidade ? g.valorTotal / g.quantidade : 0 }))
+    .sort((a, b) => b.quantidade - a.quantidade);
+}
+
+const RECUPERADOS_EXPORT_MAP = {
+  codigoFornecedor: "Código_Fornecedor", descricao: "Descrição", quantidade: "Quantidade",
+  valorUnitMedio: "Valor_Unitário_Médio", valorTotal: "Valor_Total",
+};
+
+function gerarHtmlRecuperados(db) {
+  const linhas = agruparRecuperados(db.produtos);
+  const totalUnidades = linhas.reduce((s, l) => s + l.quantidade, 0);
+  const totalValor = linhas.reduce((s, l) => s + l.valorTotal, 0);
+  const style = `
+    body{font-family:Arial,sans-serif;color:#333;margin:20px;}
+    .barra{background:#003D8D;color:#fff;padding:14px 18px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;}
+    .barra h1{font-size:16px;margin:0;} .barra p{font-size:11px;margin:2px 0 0;color:#BFD3EE;}
+    table{width:100%;border-collapse:collapse;font-size:11px;}
+    th,td{border:1px solid #999;padding:5px;text-align:left;}
+    th{background:#eef1f6;} td.num{text-align:right;}
+    tfoot td{font-weight:bold;border-top:2px solid #003D8D;}
+    @media print { @page { size: A4 portrait; margin: 12mm; } }
+  `;
+  let corpo = `<div class="barra"><div><h1>PENTÁGONO OUTLET DE ELETRODOMÉSTICOS</h1></div><div style="text-align:right"><h1>RELATÓRIO DE PRODUTOS RECUPERADOS</h1><p>Gerado em ${todayStr()} — agrupado por código</p></div></div>`;
+  corpo += `<table><thead><tr><th>Código</th><th>Descrição</th><th>Qtd.</th><th>Valor Unit. (médio)</th><th>Valor Total</th></tr></thead><tbody>`;
+  linhas.forEach((l) => {
+    corpo += `<tr><td>${l.codigoFornecedor}</td><td>${l.descricao}</td><td class="num">${l.quantidade}</td><td class="num">${l.valorUnitMedio ? "R$ " + l.valorUnitMedio.toFixed(2) : "-"}</td><td class="num">${l.valorTotal ? "R$ " + l.valorTotal.toFixed(2) : "-"}</td></tr>`;
+  });
+  if (linhas.length === 0) corpo += `<tr><td colspan="5" style="text-align:center;color:#999;">Nenhum produto recuperado ainda.</td></tr>`;
+  corpo += `</tbody>`;
+  if (linhas.length > 0) {
+    corpo += `<tfoot><tr><td colspan="2">Total</td><td class="num">${totalUnidades}</td><td></td><td class="num">R$ ${totalValor.toFixed(2)}</td></tr></tfoot>`;
+  }
+  corpo += `</table>`;
+  return `<html><head><title>Relatório de Recuperados</title><style>${style}</style></head><body>${corpo}</body></html>`;
+}
+
+function RelatorioRecuperadosImpresso({ db }) {
+  const linhas = agruparRecuperados(db.produtos);
+  const totalUnidades = linhas.reduce((s, l) => s + l.quantidade, 0);
+  const totalValor = linhas.reduce((s, l) => s + l.valorTotal, 0);
+  const tdDados = "border border-slate-300 px-1.5 py-1.5 text-slate-700";
+
+  return (
+    <div>
+      <ImpressoHeader title="RELATÓRIO DE PRODUTOS RECUPERADOS" subtitle={`Gerado em ${todayStr()} — agrupado por código`} />
+      <table className="w-full text-[11px] border-collapse border border-slate-400">
+        <thead>
+          <tr>
+            <th className={thCls}>Código</th>
+            <th className={thCls}>Descrição</th>
+            <th className={thCls + " w-16 text-right"}>Qtd.</th>
+            <th className={thCls + " w-24 text-right"}>Valor Unit. (méd.)</th>
+            <th className={thCls + " w-24 text-right"}>Valor Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {linhas.map((l, i) => (
+            <tr key={i}>
+              <td className={tdDados + " font-mono"}>{l.codigoFornecedor}</td>
+              <td className={tdDados}>{l.descricao}</td>
+              <td className={tdDados + " text-right"}>{l.quantidade}</td>
+              <td className={tdDados + " text-right"}>{l.valorUnitMedio ? "R$ " + l.valorUnitMedio.toFixed(2) : "-"}</td>
+              <td className={tdDados + " text-right"}>{l.valorTotal ? "R$ " + l.valorTotal.toFixed(2) : "-"}</td>
+            </tr>
+          ))}
+          {linhas.length === 0 && (
+            <tr><td colSpan={5} className="text-center py-4 text-slate-400 border border-slate-300">Nenhum produto recuperado ainda.</td></tr>
+          )}
+        </tbody>
+        {linhas.length > 0 && (
+          <tfoot>
+            <tr className="font-semibold">
+              <td className={tdDados} colSpan={2}>Total</td>
+              <td className={tdDados + " text-right"}>{totalUnidades}</td>
+              <td className={tdDados}></td>
+              <td className={tdDados + " text-right"}>R$ {totalValor.toFixed(2)}</td>
+            </tr>
+          </tfoot>
+        )}
+      </table>
+    </div>
+  );
+}
+
+function Imprimir({ db }) {
   const [formSel, setFormSel] = useState("triagem");
   const [avisoPopup, setAvisoPopup] = useState(false);
   const opcoes = [
     { id: "triagem", label: "Mapa de Triagem" },
     { id: "desmontagem", label: "Ordem de Desmontagem" },
     { id: "requisicao", label: "Mapa de Requisição" },
+    { id: "recuperados", label: "Relatório de Recuperados" },
   ];
 
   function abrirParaImprimir() {
     setAvisoPopup(false);
-    const html = gerarHtmlImpressao(formSel);
+    const html = formSel === "recuperados" ? gerarHtmlRecuperados(db) : gerarHtmlImpressao(formSel);
     const win = window.open("", "_blank", "width=1000,height=700");
     if (!win) {
       setAvisoPopup(true);
@@ -1874,6 +2304,14 @@ function Imprimir() {
           <button onClick={abrirParaImprimir} className="text-sm border border-slate-300 rounded-lg px-4 py-2.5 hover:bg-slate-50 flex items-center gap-1.5">
             <Printer size={16} /> Abrir em nova janela para imprimir
           </button>
+          {formSel === "recuperados" && (
+            <button
+              onClick={() => downloadCSV("relatorio_recuperados.csv", mapRowsForExport(agruparRecuperados(db.produtos), RECUPERADOS_EXPORT_MAP))}
+              className="text-sm border border-slate-300 rounded-lg px-4 py-2.5 hover:bg-slate-50 flex items-center gap-1.5"
+            >
+              <Download size={16} /> Baixar como CSV
+            </button>
+          )}
         </div>
         {avisoPopup && (
           <div className="mt-3 text-sm text-amber-800 bg-amber-50 border border-amber-300 rounded-lg p-3">
@@ -1887,6 +2325,7 @@ function Imprimir() {
         {formSel === "triagem" && <FormularioTriagemImpresso />}
         {formSel === "desmontagem" && <FormularioDesmontagemImpresso />}
         {formSel === "requisicao" && <FormularioRequisicaoImpresso />}
+        {formSel === "recuperados" && <RelatorioRecuperadosImpresso db={db} />}
       </div>
     </div>
   );
