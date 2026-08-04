@@ -75,9 +75,16 @@ export default function SalvadosApp() {
 
   // Rede de segurança: qualquer erro não tratado em qualquer parte do app aparece na tela,
   // em vez de falhar em silêncio (o que estava acontecendo com o structuredClone).
+  // Ignora erros conhecidos de extensões de navegador (carteiras de cripto, etc.) que não têm relação com o sistema.
   useEffect(() => {
+    const RUIDO_IGNORADO = ["metamask", "ethereum", "web3", "wallet", "solana", "coinbase"];
     function handleError(e) {
       const msg = (e && e.reason && e.reason.message) || (e && e.message) || "Erro inesperado";
+      const msgLower = msg.toLowerCase();
+      if (RUIDO_IGNORADO.some((termo) => msgLower.includes(termo))) {
+        console.warn("Erro de extensão do navegador ignorado (não é do sistema):", msg);
+        return;
+      }
       showToast("Erro no sistema: " + msg + " — tente novamente ou avise o suporte.", "erro");
       console.error("Erro capturado:", e);
     }
@@ -578,7 +585,7 @@ export default function SalvadosApp() {
           </div>
         </div>
         <div className="text-xs brand-subtext-color flex items-center gap-2">
-          <span className="opacity-60 font-mono">v2026.08.03-2</span>
+          <span className="opacity-60 font-mono">v2026.08.03-3</span>
           {saving ? <><RefreshCw size={12} className="animate-spin" /> salvando...</> : <>dados salvados</>}
         </div>
       </header>
