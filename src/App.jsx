@@ -368,92 +368,108 @@ export default function SalvadosApp() {
     showToast(`Ordem ${odId} registrada: ${pecas.length} peça(s) no estoque.`);
   }
 
-  async function aplicarRequisicaoInterna(necId, pecaBoaId, pecaInstalada) {
+  async function aplicarRequisicaoInternaLote(necIds, pecaBoaId, pecaInstalada) {
     const next = clone(db);
-    const nec = next.pecasFaltantes.find((n) => n.id === necId);
     const pecaBoa = next.pecasBoas.find((p) => p.id === pecaBoaId);
-    const produto = next.produtos.find((p) => p.id === nec.produtoId);
-    if (!nec || !pecaBoa || !produto) return;
+    if (!pecaBoa) return;
+    let aplicados = 0;
 
-    pecaBoa.quantidade -= 1;
+    necIds.forEach((necId) => {
+      if (pecaBoa.quantidade <= 0) return;
+      const nec = next.pecasFaltantes.find((n) => n.id === necId);
+      const produto = next.produtos.find((p) => p.id === nec?.produtoId);
+      if (!nec || !produto) return;
+
+      pecaBoa.quantidade -= 1;
+      nec.fonte = "Estoque de Peças Boas (Interno)";
+      nec.status = "Aplicado";
+      nec.dataAplicacao = todayStr();
+      nec.pecaInstalada = pecaInstalada || pecaBoa.descricao;
+
+      const statusAnterior = produto.status;
+      produto.status = "Em Reparo";
+      produto.estoqueAtual = "Estoque de Sub-Conjuntos";
+
+      addHistorico(next, {
+        tipoItem: "Produto", idItem: produto.id,
+        statusAnterior, statusNovo: "Em Reparo",
+        estoqueOrigem: "Estoque de Peças Boas", estoqueDestino: "Estoque de Sub-Conjuntos",
+        responsavel: nec.responsavel, documento: necId,
+        motivo: `Peça instalada: ${nec.pecaInstalada} (origem interna, ${pecaBoa.id})`,
+      });
+      aplicados += 1;
+    });
     if (pecaBoa.quantidade <= 0) pecaBoa.status = "Usada Internamente";
 
-    nec.fonte = "Estoque de Peças Boas (Interno)";
-    nec.status = "Aplicado";
-    nec.dataAplicacao = todayStr();
-    nec.pecaInstalada = pecaInstalada || pecaBoa.descricao;
-
-    const statusAnterior = produto.status;
-    produto.status = "Em Reparo";
-    produto.estoqueAtual = "Estoque de Sub-Conjuntos";
-
-    addHistorico(next, {
-      tipoItem: "Produto", idItem: produto.id,
-      statusAnterior, statusNovo: "Em Reparo",
-      estoqueOrigem: "Estoque de Peças Boas", estoqueDestino: "Estoque de Sub-Conjuntos",
-      responsavel: nec.responsavel, documento: necId,
-      motivo: `Peça instalada: ${nec.pecaInstalada} (origem interna, ${pecaBoa.id})`,
-    });
-
     await persist(next);
-    showToast(`Peça aplicada. ${produto.id} pronto para reteste.`);
+    if (aplicados < necIds.length) {
+      showToast(`${aplicados} unidade(s) aplicada(s) — estoque da peça acabou antes de cobrir todas.`, "erro");
+    } else {
+      showToast(`${aplicados} unidade(s) atualizada(s), prontas para reteste.`);
+    }
   }
 
-  async function marcarRequisicaoExterna(necId) {
+  async function marcarRequisicaoExternaLote(necIds) {
     const next = clone(db);
-    const nec = next.pecasFaltantes.find((n) => n.id === necId);
-    if (!nec) return;
-    nec.fonte = "Compra Externa";
-    nec.status = "Solicitado";
+    necIds.forEach((necId) => {
+      const nec = next.pecasFaltantes.find((n) => n.id === necId);
+      if (nec) { nec.fonte = "Compra Externa"; nec.status = "Solicitado"; }
+    });
     await persist(next);
-    showToast(`Compra externa solicitada para ${necId}.`);
+    showToast(`Compra externa solicitada para ${necIds.length} unidade(s).`);
   }
 
-  async function confirmarRecebimentoExterno(necId, pecaInstalada) {
+  async function confirmarRecebimentoExternoLote(necIds, pecaInstalada) {
     const next = clone(db);
-    const nec = next.pecasFaltantes.find((n) => n.id === necId);
-    const produto = next.produtos.find((p) => p.id === nec.produtoId);
-    if (!nec || !produto) return;
-    nec.status = "Aplicado";
-    nec.dataAplicacao = todayStr();
-    nec.pecaInstalada = pecaInstalada || nec.peca;
-    const statusAnterior = produto.status;
-    produto.status = "Em Reparo";
+    let aplicados = 0;
+    necIds.forEach((necId) => {
+      const nec = next.pecasFaltantes.find((n) => n.id === necId);
+      const produto = next.produtos.find((p) => p.id === nec?.produtoId);
+      if (!nec || !produto) return;
+      nec.status = "Aplicado";
+      nec.dataAplicacao = todayStr();
+      nec.pecaInstalada = pecaInstalada || nec.peca;
+      const statusAnterior = produto.status;
+      produto.status = "Em Reparo";
 
-    addHistorico(next, {
-      tipoItem: "Produto", idItem: produto.id,
-      statusAnterior, statusNovo: "Em Reparo",
-      estoqueOrigem: "Compra Externa", estoqueDestino: "Estoque de Sub-Conjuntos",
-      responsavel: nec.responsavel, documento: necId,
-      motivo: `Peça instalada: ${nec.pecaInstalada} (comprada externamente)`,
+      addHistorico(next, {
+        tipoItem: "Produto", idItem: produto.id,
+        statusAnterior, statusNovo: "Em Reparo",
+        estoqueOrigem: "Compra Externa", estoqueDestino: "Estoque de Sub-Conjuntos",
+        responsavel: nec.responsavel, documento: necId,
+        motivo: `Peça instalada: ${nec.pecaInstalada} (comprada externamente)`,
+      });
+      aplicados += 1;
     });
-
     await persist(next);
-    showToast(`Peça recebida e aplicada. ${produto.id} pronto para reteste.`);
+    showToast(`${aplicados} unidade(s) recebida(s) e aplicada(s), prontas para reteste.`);
   }
 
-  async function aplicarAjusteInterno(necId, descricaoAjuste) {
+  async function aplicarAjusteInternoLote(necIds, descricaoAjuste) {
     const next = clone(db);
-    const nec = next.pecasFaltantes.find((n) => n.id === necId);
-    const produto = next.produtos.find((p) => p.id === nec.produtoId);
-    if (!nec || !produto) return;
-    nec.fonte = "Ajuste Interno (sem peça)";
-    nec.status = "Aplicado";
-    nec.dataAplicacao = todayStr();
-    nec.pecaInstalada = descricaoAjuste || nec.peca;
-    const statusAnterior = produto.status;
-    produto.status = "Em Reparo";
+    let aplicados = 0;
+    necIds.forEach((necId) => {
+      const nec = next.pecasFaltantes.find((n) => n.id === necId);
+      const produto = next.produtos.find((p) => p.id === nec?.produtoId);
+      if (!nec || !produto) return;
+      nec.fonte = "Ajuste Interno (sem peça)";
+      nec.status = "Aplicado";
+      nec.dataAplicacao = todayStr();
+      nec.pecaInstalada = descricaoAjuste || nec.peca;
+      const statusAnterior = produto.status;
+      produto.status = "Em Reparo";
 
-    addHistorico(next, {
-      tipoItem: "Produto", idItem: produto.id,
-      statusAnterior, statusNovo: "Em Reparo",
-      estoqueOrigem: produto.estoqueAtual, estoqueDestino: "Estoque de Sub-Conjuntos",
-      responsavel: nec.responsavel, documento: necId,
-      motivo: `Ajuste interno realizado: ${nec.pecaInstalada}`,
+      addHistorico(next, {
+        tipoItem: "Produto", idItem: produto.id,
+        statusAnterior, statusNovo: "Em Reparo",
+        estoqueOrigem: produto.estoqueAtual, estoqueDestino: "Estoque de Sub-Conjuntos",
+        responsavel: nec.responsavel, documento: necId,
+        motivo: `Ajuste interno realizado: ${nec.pecaInstalada}`,
+      });
+      aplicados += 1;
     });
-
     await persist(next);
-    showToast(`Ajuste registrado. ${produto.id} pronto para reteste.`);
+    showToast(`Ajuste registrado para ${aplicados} unidade(s), prontas para reteste.`);
   }
 
   async function retestarProduto(produtoId, resultado, destino) {
@@ -561,7 +577,8 @@ export default function SalvadosApp() {
             <div className="text-xs brand-subtext-color leading-tight">Triagem · Desmontagem · Peças</div>
           </div>
         </div>
-        <div className="text-xs brand-subtext-color flex items-center gap-1">
+        <div className="text-xs brand-subtext-color flex items-center gap-2">
+          <span className="opacity-60 font-mono">v2026.08.03-2</span>
           {saving ? <><RefreshCw size={12} className="animate-spin" /> salvando...</> : <>dados salvados</>}
         </div>
       </header>
@@ -597,10 +614,10 @@ export default function SalvadosApp() {
         {tab === "requisicao" && (
           <Requisicao
             db={db}
-            onAplicarInterna={aplicarRequisicaoInterna}
-            onExterna={marcarRequisicaoExterna}
-            onConfirmarExterna={confirmarRecebimentoExterno}
-            onAjusteInterno={aplicarAjusteInterno}
+            onAplicarInterna={aplicarRequisicaoInternaLote}
+            onExterna={marcarRequisicaoExternaLote}
+            onConfirmarExterna={confirmarRecebimentoExternoLote}
+            onAjusteInterno={aplicarAjusteInternoLote}
             onRetestar={retestarProduto}
           />
         )}
@@ -716,15 +733,26 @@ function AproveitamentoChart({ produtos, pecasBoas, titulo, subtitulo }) {
   );
 }
 
+function agruparParados(db) {
+  const pendentes = db.pecasFaltantes.filter((n) => n.status !== "Aplicado");
+  const grupos = {};
+  pendentes.forEach((n) => {
+    const produto = db.produtos.find((p) => p.id === n.produtoId);
+    const codigo = produto ? produto.codigoFornecedor : "-";
+    const key = codigo + "|" + n.peca;
+    if (!grupos[key]) grupos[key] = { codigo, peca: n.peca, qtd: 0, maisAntiga: n.dataSolicitacao };
+    grupos[key].qtd += 1;
+    if (n.dataSolicitacao < grupos[key].maisAntiga) grupos[key].maisAntiga = n.dataSolicitacao;
+  });
+  return Object.values(grupos).sort((a, b) => (a.maisAntiga < b.maisAntiga ? -1 : 1));
+}
+
 function Painel({ db }) {
   const total = db.produtos.length;
   const porStatus = {};
   db.produtos.forEach((p) => { porStatus[p.status] = (porStatus[p.status] || 0) + 1; });
 
-  const parados = [...db.pecasFaltantes]
-    .filter((n) => n.status !== "Aplicado")
-    .sort((a, b) => new Date(a.dataSolicitacao) - new Date(b.dataSolicitacao))
-    .slice(0, 6);
+  const parados = agruparParados(db).slice(0, 8);
 
   return (
     <div className="space-y-4">
@@ -765,13 +793,14 @@ function Painel({ db }) {
           <div className="text-sm text-slate-400">Nenhum sub-conjunto pendente no momento.</div>
         ) : (
           <div className="space-y-2">
-            {parados.map((n) => (
-              <div key={n.id} className="flex items-center justify-between text-sm border-b border-slate-100 pb-2 last:border-0">
+            {parados.map((g, i) => (
+              <div key={i} className="flex items-center justify-between text-sm border-b border-slate-100 pb-2 last:border-0">
                 <div>
-                  <span className="font-medium">{n.produtoId}</span> — precisa de <span className="text-slate-600">{n.peca}</span>
+                  <span className="font-mono font-medium">{g.codigo}</span> — precisa de <span className="text-slate-600">{g.peca}</span>
+                  <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium ml-2">{g.qtd} un.</span>
                 </div>
                 <div className="text-xs text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
-                  {daysSince(n.dataSolicitacao)} dia(s) aguardando
+                  {daysSince(g.maisAntiga)} dia(s) aguardando
                 </div>
               </div>
             ))}
@@ -783,6 +812,17 @@ function Painel({ db }) {
 }
 
 // ---------------- POR LOTE ----------------
+
+
+function agruparProdutosPorSituacao(produtos) {
+  const grupos = {};
+  produtos.forEach((p) => {
+    const key = p.codigoFornecedor + "|" + p.descricao + "|" + p.status + "|" + p.estoqueAtual;
+    if (!grupos[key]) grupos[key] = { codigoFornecedor: p.codigoFornecedor, descricao: p.descricao, status: p.status, estoqueAtual: p.estoqueAtual, qtd: 0 };
+    grupos[key].qtd += 1;
+  });
+  return Object.values(grupos).sort((a, b) => b.qtd - a.qtd);
+}
 
 function PorLote({ db }) {
   const lotesInfo = {};
@@ -851,32 +891,31 @@ function PorLote({ db }) {
       </Card>
 
       <Card className="p-4">
-        <h2 className="font-semibold mb-3">Unidades do lote {loteSel}</h2>
+        <h2 className="font-semibold mb-3">Resumo do lote {loteSel} — por código e situação</h2>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs text-slate-500 border-b border-slate-200">
-                <th className="py-2 pr-3">ID Interno</th>
                 <th className="py-2 pr-3">SKU</th>
                 <th className="py-2 pr-3">Descrição</th>
                 <th className="py-2 pr-3">Status</th>
                 <th className="py-2 pr-3">Estoque Atual</th>
-                <th className="py-2 pr-3">Técnico</th>
+                <th className="py-2 pr-3 text-right">Quantidade</th>
               </tr>
             </thead>
             <tbody>
-              {produtosDoLote.map((p) => (
-                <tr key={p.id} className="border-b border-slate-100 last:border-0">
-                  <td className="py-2 pr-3 font-mono text-xs">{p.id}</td>
-                  <td className="py-2 pr-3">{p.codigoFornecedor}</td>
-                  <td className="py-2 pr-3">{p.descricao}</td>
-                  <td className="py-2 pr-3"><StatusBadge status={p.status} /></td>
-                  <td className="py-2 pr-3 text-slate-500">{p.estoqueAtual}</td>
-                  <td className="py-2 pr-3 text-slate-500">{p.tecnico || "-"}</td>
+              {agruparProdutosPorSituacao(produtosDoLote).map((g, i) => (
+                <tr key={i} className="border-b border-slate-100 last:border-0">
+                  <td className="py-2 pr-3 font-mono text-xs">{g.codigoFornecedor}</td>
+                  <td className="py-2 pr-3">{g.descricao}</td>
+                  <td className="py-2 pr-3"><StatusBadge status={g.status} /></td>
+                  <td className="py-2 pr-3 text-slate-500">{g.estoqueAtual}</td>
+                  <td className="py-2 pr-3 text-right font-medium">{g.qtd}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+
         </div>
       </Card>
 
@@ -1052,6 +1091,18 @@ const HISTORICO_EXPORT_MAP = {
   statusAnterior: "Status_Anterior", statusNovo: "Status_Novo", estoqueOrigem: "Estoque_Origem",
   estoqueDestino: "Estoque_Destino", responsavel: "Responsável", documento: "Documento_Vinculado", motivo: "Motivo",
 };
+const HISTORICO_RESUMO_EXPORT_MAP = {
+  statusNovo: "Status_Novo", estoqueDestino: "Estoque_Destino", quantidade: "Quantidade",
+};
+function agruparHistoricoPorStatus(historico) {
+  const grupos = {};
+  historico.forEach((h) => {
+    const key = h.statusNovo + "|" + h.estoqueDestino;
+    if (!grupos[key]) grupos[key] = { statusNovo: h.statusNovo, estoqueDestino: h.estoqueDestino, quantidade: 0 };
+    grupos[key].quantidade += 1;
+  });
+  return Object.values(grupos).sort((a, b) => b.quantidade - a.quantidade);
+}
 const PECAS_BOAS_EXPORT_MAP = {
   id: "ID_Peça", produtoOrigemId: "ID_Produto_Origem", ordemDesmontagemId: "ID_Ordem_Desmontagem",
   descricao: "Descrição", categoria: "Categoria", condicao: "Condição", quantidade: "Quantidade",
@@ -1313,14 +1364,17 @@ function ImportarExportar({ db, onImportarCSV, showToast }) {
           <button onClick={() => downloadCSV("produtos.csv", mapRowsForExport(db.produtos, PRODUTOS_EXPORT_MAP))} className="text-sm border border-slate-300 rounded-lg px-3 py-2 flex items-center gap-1.5 hover:bg-slate-50">
             <Download size={15} /> Produtos ({db.produtos.length})
           </button>
-          <button onClick={() => downloadCSV("historico_movimentacoes.csv", mapRowsForExport(db.historico, HISTORICO_EXPORT_MAP))} className="text-sm border border-slate-300 rounded-lg px-3 py-2 flex items-center gap-1.5 hover:bg-slate-50">
-            <Download size={15} /> Histórico ({db.historico.length})
+          <button onClick={() => downloadCSV("historico_resumo_por_status.csv", mapRowsForExport(agruparHistoricoPorStatus(db.historico), HISTORICO_RESUMO_EXPORT_MAP))} className="text-sm border border-slate-300 rounded-lg px-3 py-2 flex items-center gap-1.5 hover:bg-slate-50">
+            <Download size={15} /> Histórico — resumo por status ({agruparHistoricoPorStatus(db.historico).length})
           </button>
           <button onClick={() => downloadCSV("pecas_boas.csv", mapRowsForExport(db.pecasBoas, PECAS_BOAS_EXPORT_MAP))} className="text-sm border border-slate-300 rounded-lg px-3 py-2 flex items-center gap-1.5 hover:bg-slate-50">
             <Download size={15} /> Peças Boas ({db.pecasBoas.length})
           </button>
           <button onClick={() => downloadCSV("pecas_faltantes.csv", mapRowsForExport(db.pecasFaltantes, PECAS_FALTANTES_EXPORT_MAP))} className="text-sm border border-slate-300 rounded-lg px-3 py-2 flex items-center gap-1.5 hover:bg-slate-50">
             <Download size={15} /> Peças Faltantes ({db.pecasFaltantes.length})
+          </button>
+          <button onClick={() => downloadCSV("historico_detalhado.csv", mapRowsForExport(db.historico, HISTORICO_EXPORT_MAP))} className="text-sm border border-slate-300 rounded-lg px-3 py-2 flex items-center gap-1.5 hover:bg-slate-50">
+            <Download size={15} /> Histórico — detalhado, linha por linha ({db.historico.length})
           </button>
         </div>
       </Card>
@@ -1504,13 +1558,25 @@ function Triagem({ db, onSubmit, onSubmitLote }) {
 
   async function submitLote(e) {
     e.preventDefault();
-    if (!grupoSelecionado || !form.tecnico) return;
+    if (!grupoSelecionado) return;
+    if (!form.tecnico.trim()) {
+      setConfirmacaoLote({ erro: true, msg: "Preencha o campo \"Técnico Responsável\" antes de salvar." });
+      return;
+    }
+    if (form.checklist === "Sub-Conjunto" && !form.pecaFaltante.trim()) {
+      setConfirmacaoLote({ erro: true, msg: "Preencha \"Peça/Insumo Faltante\" antes de salvar." });
+      return;
+    }
+    if (form.checklist === "Descarte" && !form.motivoDescarte.trim()) {
+      setConfirmacaoLote({ erro: true, msg: "Preencha o \"Motivo do Descarte\" antes de salvar." });
+      return;
+    }
     const qtd = Math.max(1, Math.min(qtdAplicar, grupoSelecionado.produtos.length));
     const idsAlvo = grupoSelecionado.produtos.slice(0, qtd).map((p) => p.id);
     setEnviandoLote(true);
     const resultado = await onSubmitLote(form, idsAlvo);
     setEnviandoLote(false);
-    setConfirmacaoLote({ triId: resultado.triId, aplicados: resultado.aplicados, sku: grupoSelecionado.codigoFornecedor });
+    setConfirmacaoLote({ erro: false, triId: resultado.triId, aplicados: resultado.aplicados, sku: grupoSelecionado.codigoFornecedor });
     setForm({ ...formInicial, tecnico: form.tecnico });
     setGrupoSelKey("");
   }
@@ -1532,10 +1598,28 @@ function Triagem({ db, onSubmit, onSubmitLote }) {
     setListaAberta(false);
   }
 
+  const [confirmacaoIndividual, setConfirmacaoIndividual] = useState(null);
+
   function submitIndividual(e) {
     e.preventDefault();
-    if (!form.produtoId || !form.tecnico) return;
+    if (!form.produtoId) {
+      setConfirmacaoIndividual({ erro: true, msg: "Selecione um produto na busca antes de salvar." });
+      return;
+    }
+    if (!form.tecnico.trim()) {
+      setConfirmacaoIndividual({ erro: true, msg: "Preencha o campo \"Técnico Responsável\" antes de salvar." });
+      return;
+    }
+    if (form.checklist === "Sub-Conjunto" && !form.pecaFaltante.trim()) {
+      setConfirmacaoIndividual({ erro: true, msg: "Preencha \"Peça/Insumo Faltante\" antes de salvar." });
+      return;
+    }
+    if (form.checklist === "Descarte" && !form.motivoDescarte.trim()) {
+      setConfirmacaoIndividual({ erro: true, msg: "Preencha o \"Motivo do Descarte\" antes de salvar." });
+      return;
+    }
     onSubmit(form);
+    setConfirmacaoIndividual({ erro: false, msg: "Triagem registrada com sucesso." });
     setForm({ ...formInicial, tecnico: form.tecnico });
     setBuscaProduto("");
   }
@@ -1554,11 +1638,17 @@ function Triagem({ db, onSubmit, onSubmitLote }) {
       {modo === "lote" ? (
         <>
           {confirmacaoLote && (
-            <div className="border border-emerald-300 bg-emerald-50 rounded-lg p-3 mb-4 flex items-start gap-2">
-              <CheckCircle2 size={18} className="text-emerald-600 mt-0.5 shrink-0" />
-              <div className="text-sm text-emerald-800">
-                <div className="font-medium">Triagem {confirmacaoLote.triId} salva com sucesso.</div>
-                <div>{confirmacaoLote.aplicados} unidade(s) do SKU {confirmacaoLote.sku} processada(s) de uma vez.</div>
+            <div className={`rounded-lg p-3 mb-4 flex items-start gap-2 border ${confirmacaoLote.erro ? "bg-rose-50 border-rose-300" : "bg-emerald-50 border-emerald-300"}`}>
+              {confirmacaoLote.erro ? <AlertTriangle size={18} className="text-rose-600 mt-0.5 shrink-0" /> : <CheckCircle2 size={18} className="text-emerald-600 mt-0.5 shrink-0" />}
+              <div className={`text-sm ${confirmacaoLote.erro ? "text-rose-800" : "text-emerald-800"}`}>
+                {confirmacaoLote.erro ? (
+                  confirmacaoLote.msg
+                ) : (
+                  <>
+                    <div className="font-medium">Triagem {confirmacaoLote.triId} salva com sucesso.</div>
+                    <div>{confirmacaoLote.aplicados} unidade(s) do SKU {confirmacaoLote.sku} processada(s) de uma vez.</div>
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -1613,6 +1703,13 @@ function Triagem({ db, onSubmit, onSubmitLote }) {
           )}
         </>
       ) : (
+        <>
+          {confirmacaoIndividual && (
+            <div className={`rounded-lg p-3 mb-4 flex items-start gap-2 border ${confirmacaoIndividual.erro ? "bg-rose-50 border-rose-300" : "bg-emerald-50 border-emerald-300"}`}>
+              {confirmacaoIndividual.erro ? <AlertTriangle size={18} className="text-rose-600 mt-0.5 shrink-0" /> : <CheckCircle2 size={18} className="text-emerald-600 mt-0.5 shrink-0" />}
+              <div className={`text-sm ${confirmacaoIndividual.erro ? "text-rose-800" : "text-emerald-800"}`}>{confirmacaoIndividual.msg}</div>
+            </div>
+          )}
         <form onSubmit={submitIndividual} className="grid grid-cols-2 gap-3">
           <div className="col-span-2 relative">
             <Field label="Produto — pesquise pelo Código do Fornecedor, ID ou descrição">
@@ -1653,6 +1750,7 @@ function Triagem({ db, onSubmit, onSubmitLote }) {
             <button type="submit" className="brand-btn rounded-lg px-4 py-2.5 text-sm font-medium">Registrar Triagem</button>
           </div>
         </form>
+        </>
       )}
     </Card>
   );
@@ -1666,6 +1764,22 @@ function Desmontagem({ db, onSubmit }) {
   const [tecnico, setTecnico] = useState("");
   const [semAproveitamento, setSemAproveitamento] = useState("");
   const [pecas, setPecas] = useState([{ descricao: "", categoria: "", condicao: "Testada OK", quantidade: 1, destino: "Uso Interno", valorVenda: "" }]);
+
+  const [buscaGrupo, setBuscaGrupo] = useState("");
+  const [grupoAbertoKey, setGrupoAbertoKey] = useState("");
+
+  const gruposDesmontagem = {};
+  elegiveis.forEach((p) => {
+    const key = p.codigoFornecedor + "|" + p.lote;
+    if (!gruposDesmontagem[key]) gruposDesmontagem[key] = { key, codigoFornecedor: p.codigoFornecedor, descricao: p.descricao, lote: p.lote, produtos: [] };
+    gruposDesmontagem[key].produtos.push(p);
+  });
+  const listaGrupos = Object.values(gruposDesmontagem).sort((a, b) => b.produtos.length - a.produtos.length);
+  const gruposFiltrados = buscaGrupo.trim()
+    ? listaGrupos.filter((g) => g.codigoFornecedor.toLowerCase().includes(buscaGrupo.toLowerCase()) || g.descricao.toLowerCase().includes(buscaGrupo.toLowerCase()))
+    : listaGrupos;
+  const grupoAberto = listaGrupos.find((g) => g.key === grupoAbertoKey);
+  const produtoSelecionado = elegiveis.find((p) => p.id === produtoId);
 
   function updatePeca(i, k, v) {
     const copy = [...pecas];
@@ -1683,22 +1797,54 @@ function Desmontagem({ db, onSubmit }) {
     e.preventDefault();
     if (!produtoId || !tecnico || pecas.some((p) => !p.descricao)) return;
     onSubmit({ produtoId, tecnico, semAproveitamento }, pecas);
-    setProdutoId(""); setTecnico(""); setSemAproveitamento("");
+    setProdutoId(""); setTecnico(""); setSemAproveitamento(""); setGrupoAbertoKey("");
     setPecas([{ descricao: "", categoria: "", condicao: "Testada OK", quantidade: 1, destino: "Uso Interno", valorVenda: "" }]);
   }
 
   return (
     <Card className="p-5 max-w-3xl">
       <h2 className="font-semibold mb-1">Ordem de Desmontagem</h2>
-      <p className="text-sm text-slate-500 mb-4">{elegiveis.length} produto(s) aguardando desmontagem.</p>
+      <p className="text-sm text-slate-500 mb-4">{elegiveis.length} unidade(s) aguardando desmontagem, em {listaGrupos.length} código(s) diferente(s).</p>
       <form onSubmit={submit} className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Produto">
-            <select className={inputCls} value={produtoId} onChange={(e) => setProdutoId(e.target.value)} required>
-              <option value="">Selecione...</option>
-              {elegiveis.map((p) => <option key={p.id} value={p.id}>{p.id} — {p.descricao}</option>)}
-            </select>
-          </Field>
+          <div className="col-span-2">
+            <Field label="Produto — busque pelo código do fornecedor">
+              <div className="relative">
+                <Search size={15} className="absolute left-2.5 top-2.5 text-slate-400" />
+                <input
+                  className={inputCls + " pl-8"}
+                  placeholder="Digite o código do fornecedor (SKU)..."
+                  value={produtoSelecionado ? `${produtoSelecionado.codigoFornecedor} — ${produtoSelecionado.descricao} (${produtoSelecionado.id})` : buscaGrupo}
+                  onChange={(e) => { setBuscaGrupo(e.target.value); setProdutoId(""); setGrupoAbertoKey(""); }}
+                  onFocus={() => { if (produtoSelecionado) { setProdutoId(""); setBuscaGrupo(""); } }}
+                />
+              </div>
+            </Field>
+            {!produtoSelecionado && buscaGrupo.trim() && !grupoAberto && (
+              <div className="mt-1 border border-slate-300 rounded-lg shadow-sm max-h-48 overflow-y-auto">
+                {gruposFiltrados.length === 0 && <div className="px-3 py-2 text-sm text-slate-400">Nenhum código aguardando desmontagem com esse termo.</div>}
+                {gruposFiltrados.map((g) => (
+                  <button type="button" key={g.key} onClick={() => { if (g.produtos.length === 1) { setProdutoId(g.produtos[0].id); setBuscaGrupo(""); } else { setGrupoAbertoKey(g.key); } }}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 border-b border-slate-100 last:border-0 flex items-center justify-between">
+                    <span><span className="font-mono font-medium">{g.codigoFornecedor}</span><span className="text-slate-500"> — {g.descricao}</span></span>
+                    <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">{g.produtos.length} un.</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {grupoAberto && !produtoSelecionado && (
+              <div className="mt-1 border border-amber-300 bg-amber-50 rounded-lg p-2">
+                <div className="text-xs text-amber-800 mb-1.5">{grupoAberto.produtos.length} unidades disponíveis deste código — escolha qual desmontar:</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {grupoAberto.produtos.map((p) => (
+                    <button type="button" key={p.id} onClick={() => { setProdutoId(p.id); setGrupoAbertoKey(""); }} className="text-xs bg-white border border-slate-300 rounded-lg px-2 py-1 hover:bg-slate-50 font-mono">
+                      {p.id}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
           <Field label="Técnico Responsável"><input className={inputCls} value={tecnico} onChange={(e) => setTecnico(e.target.value)} required /></Field>
         </div>
 
@@ -1736,54 +1882,79 @@ function Desmontagem({ db, onSubmit }) {
 
 // ---------------- REQUISIÇÃO DE PEÇAS ----------------
 
-function NecessidadeCard({ n, db, onAplicarInterna, onExterna, onConfirmarExterna, onAjusteInterno }) {
+function agruparNecessidades(pendentes, produtos) {
+  const grupos = {};
+  pendentes.forEach((n) => {
+    const produto = produtos.find((p) => p.id === n.produtoId);
+    const codigo = produto ? produto.codigoFornecedor : "-";
+    const key = codigo + "|" + n.peca + "|" + n.status;
+    if (!grupos[key]) grupos[key] = { codigo, peca: n.peca, status: n.status, ids: [], qtd: 0, maisAntiga: n.dataSolicitacao };
+    grupos[key].ids.push(n.id);
+    grupos[key].qtd += 1;
+    if (n.dataSolicitacao < grupos[key].maisAntiga) grupos[key].maisAntiga = n.dataSolicitacao;
+  });
+  return Object.values(grupos).sort((a, b) => (a.maisAntiga < b.maisAntiga ? -1 : 1));
+}
+
+function NecessidadeGroupCard({ grupo, db, onAplicarInterna, onExterna, onConfirmarExterna, onAjusteInterno }) {
   const candidatas = db.pecasBoas.filter(
     (pb) => pb.status === "Disponível" && pb.quantidade > 0 &&
-      pb.descricao.toLowerCase().includes(n.peca.toLowerCase().split(" ")[0])
+      pb.descricao.toLowerCase().includes(grupo.peca.toLowerCase().split(" ")[0])
   );
-  const [descricaoInstalada, setDescricaoInstalada] = useState(n.peca);
+  const [qtdAplicar, setQtdAplicar] = useState(grupo.qtd);
+  const [descricaoInstalada, setDescricaoInstalada] = useState(grupo.peca);
+
+  const idsAlvo = grupo.ids.slice(0, Math.max(1, Math.min(qtdAplicar, grupo.qtd)));
 
   return (
     <div className="border border-slate-200 rounded-lg p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="text-sm">
-          <span className="font-mono text-xs text-slate-400">{n.id}</span>{" "}
-          <span className="font-medium">{n.produtoId}</span> precisa de{" "}
-          <span className="text-slate-700">{n.peca}</span> (qtd {n.quantidade})
+          <span className="font-mono font-medium">{grupo.codigo}</span> precisa de{" "}
+          <span className="text-slate-700">{grupo.peca}</span>
         </div>
-        <span className="text-xs px-2 py-0.5 rounded-full border bg-amber-50 border-amber-200 text-amber-700">{n.status}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">{grupo.qtd} un.</span>
+          <span className="text-xs px-2 py-0.5 rounded-full border bg-amber-50 border-amber-200 text-amber-700">{grupo.status}</span>
+        </div>
       </div>
 
-      {(n.status === "Aguardando" || n.status === "Solicitado") && (
-        <div className="mt-2.5">
-          <label className="text-xs text-slate-500 block mb-1">Peça/ajuste que foi efetivamente instalado (edite se for diferente do que foi pedido):</label>
-          <input className={inputCls + " text-xs"} value={descricaoInstalada} onChange={(e) => setDescricaoInstalada(e.target.value)} placeholder="Ex: Resistência 220V nova, transformador trocado..." />
+      {(grupo.status === "Aguardando" || grupo.status === "Solicitado") && (
+        <div className="mt-2.5 grid grid-cols-2 gap-2">
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">Quantidade a aplicar (máx. {grupo.qtd})</label>
+            <input type="number" min="1" max={grupo.qtd} className={inputCls + " text-xs"} value={qtdAplicar} onChange={(e) => setQtdAplicar(parseInt(e.target.value, 10) || 1)} />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">Peça/ajuste efetivamente instalado</label>
+            <input className={inputCls + " text-xs"} value={descricaoInstalada} onChange={(e) => setDescricaoInstalada(e.target.value)} placeholder="Ex: Resistência 220V nova..." />
+          </div>
         </div>
       )}
 
-      {n.status === "Aguardando" && (
+      {grupo.status === "Aguardando" && (
         <div className="mt-2 flex flex-wrap gap-2 items-center">
           {candidatas.length > 0 ? (
             candidatas.map((c) => (
-              <button key={c.id} onClick={() => onAplicarInterna(n.id, c.id, descricaoInstalada || c.descricao)}
+              <button key={c.id} onClick={() => onAplicarInterna(idsAlvo, c.id, descricaoInstalada || c.descricao)}
                 className="text-xs bg-emerald-600 text-white px-2.5 py-1.5 rounded-lg hover:bg-emerald-700">
-                Usar {c.id} — {c.descricao} (estoque interno)
+                Usar {c.id} — {c.descricao} ({c.quantidade} disp.)
               </button>
             ))
           ) : (
             <span className="text-xs text-slate-400">Nenhuma peça compatível no estoque interno.</span>
           )}
-          <button onClick={() => onExterna(n.id)} className="text-xs bg-slate-700 text-white px-2.5 py-1.5 rounded-lg hover:bg-slate-800">
+          <button onClick={() => onExterna(idsAlvo)} className="text-xs bg-slate-700 text-white px-2.5 py-1.5 rounded-lg hover:bg-slate-800">
             Solicitar compra externa
           </button>
-          <button onClick={() => onAjusteInterno(n.id, descricaoInstalada)} className="text-xs border border-slate-300 text-slate-700 px-2.5 py-1.5 rounded-lg hover:bg-slate-50">
+          <button onClick={() => onAjusteInterno(idsAlvo, descricaoInstalada)} className="text-xs border border-slate-300 text-slate-700 px-2.5 py-1.5 rounded-lg hover:bg-slate-50">
             Ajuste interno (sem comprar peça)
           </button>
         </div>
       )}
-      {n.status === "Solicitado" && (
+      {grupo.status === "Solicitado" && (
         <div className="mt-2">
-          <button onClick={() => onConfirmarExterna(n.id, descricaoInstalada)} className="text-xs bg-emerald-600 text-white px-2.5 py-1.5 rounded-lg hover:bg-emerald-700">
+          <button onClick={() => onConfirmarExterna(idsAlvo, descricaoInstalada)} className="text-xs bg-emerald-600 text-white px-2.5 py-1.5 rounded-lg hover:bg-emerald-700">
             Confirmar recebimento e aplicar
           </button>
         </div>
@@ -1794,19 +1965,20 @@ function NecessidadeCard({ n, db, onAplicarInterna, onExterna, onConfirmarExtern
 
 function Requisicao({ db, onAplicarInterna, onExterna, onConfirmarExterna, onAjusteInterno, onRetestar }) {
   const pendentes = db.pecasFaltantes.filter((n) => n.status !== "Aplicado");
+  const grupos = agruparNecessidades(pendentes, db.produtos);
   const emReparo = db.produtos.filter((p) => p.status === "Em Reparo");
 
   return (
     <div className="space-y-4">
       <Card className="p-4">
         <h2 className="font-semibold mb-3">Necessidades pendentes</h2>
-        {pendentes.length === 0 ? (
+        {grupos.length === 0 ? (
           <div className="text-sm text-slate-400">Nenhuma peça pendente no momento.</div>
         ) : (
           <div className="space-y-3">
-            {pendentes.map((n) => (
-              <NecessidadeCard
-                key={n.id} n={n} db={db}
+            {grupos.map((g, i) => (
+              <NecessidadeGroupCard
+                key={i} grupo={g} db={db}
                 onAplicarInterna={onAplicarInterna}
                 onExterna={onExterna}
                 onConfirmarExterna={onConfirmarExterna}
