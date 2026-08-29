@@ -389,9 +389,13 @@ export default function SalvadosApp() {
     const next = await fetchLatestDb();
     const odId = "OD-" + pad4(next.contadores.od + 1);
     next.contadores.od += 1;
-    const produto = next.produtos.find((p) => p.id === form.produtoId);
-    if (!produto) return;
-    const statusAnterior = produto.status;
+    const produtoIds = form.produtoIds || (form.produtoId ? [form.produtoId] : []);
+    const produtosAfetados = produtoIds.map((id) => next.produtos.find((p) => p.id === id)).filter(Boolean);
+    if (produtosAfetados.length === 0) return;
+
+    const origemLabel = produtosAfetados.length === 1
+      ? produtosAfetados[0].id
+      : `${produtosAfetados[0].id} (+${produtosAfetados.length - 1} outra(s))`;
 
     pecas.forEach((peca) => {
       const pcId = "PC-" + pad4(next.contadores.pc + 1);
@@ -400,7 +404,8 @@ export default function SalvadosApp() {
       next.pecasBoas = [
         {
           id: pcId,
-          produtoOrigemId: produto.id,
+          produtoOrigemId: origemLabel,
+          produtosOrigemIds: produtoIds,
           ordemDesmontagemId: odId,
           codigoPeca: peca.codigoPeca || "",
           descricao: peca.descricao,
@@ -416,19 +421,21 @@ export default function SalvadosApp() {
       ];
     });
 
-    produto.status = "Desmontado";
-    produto.estoqueAtual = "Estoque de Peças Boas";
-
-    addHistorico(next, {
-      tipoItem: "Produto", idItem: produto.id,
-      statusAnterior, statusNovo: "Desmontado",
-      estoqueOrigem: "Triagem (Recebimento)", estoqueDestino: "Estoque de Peças Boas",
-      responsavel: form.tecnico, documento: odId,
-      motivo: `${pecas.length} peça(s) gerada(s)${form.semAproveitamento ? " | Sem aproveitamento: " + form.semAproveitamento : ""}`,
+    produtosAfetados.forEach((produto) => {
+      const statusAnterior = produto.status;
+      produto.status = "Desmontado";
+      produto.estoqueAtual = "Estoque de Peças Boas";
+      addHistorico(next, {
+        tipoItem: "Produto", idItem: produto.id,
+        statusAnterior, statusNovo: "Desmontado",
+        estoqueOrigem: "Triagem (Recebimento)", estoqueDestino: "Estoque de Peças Boas",
+        responsavel: form.tecnico, documento: odId,
+        motivo: `${pecas.length} tipo(s) de peça gerada(s) no lote de ${produtosAfetados.length} unidade(s)${form.semAproveitamento ? " | Sem aproveitamento: " + form.semAproveitamento : ""}`,
+      });
     });
 
     await persist(next);
-    showToast(`Ordem ${odId} registrada: ${pecas.length} peça(s) no estoque.`);
+    showToast(`Ordem ${odId} registrada: ${pecas.length} tipo(s) de peça, ${produtosAfetados.length} unidade(s) desmontada(s).`);
   }
 
   function aplicarReclassificacaoInversao(produto, nec, custoAdicional) {
@@ -792,7 +799,7 @@ export default function SalvadosApp() {
           </div>
         </div>
         <div className="text-xs brand-subtext-color flex items-center gap-2">
-          <span className="opacity-60 font-mono">v2026.08.18-5-fix-componentes</span>
+          <span className="opacity-60 font-mono">v2026.08.18-7-desmontagem-em-lote</span>
           {saving ? <><RefreshCw size={12} className="animate-spin" /> salvando...</> : <>dados salvados</>}
         </div>
       </header>
@@ -2102,7 +2109,8 @@ function Triagem({ db, onSubmit, onSubmitLote }) {
 function Desmontagem({ db, onSubmit, onSalvarComponentes, onExcluirComponentes }) {
   const [modo, setModo] = useState("desmontar");
   const elegiveis = db.produtos.filter((p) => p.status === "Aguardando Desmontagem");
-  const [produtoId, setProdutoId] = useState("");
+  const [grupoSelKey, setGrupoSelKey] = useState("");
+  const [qtdDesmontar, setQtdDesmontar] = useState(1);
   const [tecnico, setTecnico] = useState("");
   const [semAproveitamento, setSemAproveitamento] = useState("");
   const pecaVazia = { codigoPeca: "", descricao: "", categoria: "", condicao: "Testada OK", quantidade: 1, destino: "Uso Interno", valorVenda: "" };
@@ -2110,7 +2118,6 @@ function Desmontagem({ db, onSubmit, onSalvarComponentes, onExcluirComponentes }
   const [bomCarregado, setBomCarregado] = useState(false);
 
   const [buscaGrupo, setBuscaGrupo] = useState("");
-  const [grupoAbertoKey, setGrupoAbertoKey] = useState("");
 
   const gruposDesmontagem = {};
   elegiveis.forEach((p) => {
@@ -2122,18 +2129,23 @@ function Desmontagem({ db, onSubmit, onSalvarComponentes, onExcluirComponentes }
   const gruposFiltrados = buscaGrupo.trim()
     ? listaGrupos.filter((g) => g.codigoFornecedor.toLowerCase().includes(buscaGrupo.toLowerCase()) || g.descricao.toLowerCase().includes(buscaGrupo.toLowerCase()))
     : listaGrupos;
-  const grupoAberto = listaGrupos.find((g) => g.key === grupoAbertoKey);
-  const produtoSelecionado = elegiveis.find((p) => p.id === produtoId);
+  const grupoSelecionado = listaGrupos.find((g) => g.key === grupoSelKey);
 
-  function carregarPecasParaProduto(produto) {
-    const bom = db.componentes.filter((c) => c.codigoFornecedor === produto.codigoFornecedor);
+  function carregarPecasParaGrupo(codigoFornecedor, quantidade) {
+    const bom = db.componentes.filter((c) => c.codigoFornecedor === codigoFornecedor);
     if (bom.length > 0) {
-      setPecas(bom.map((c) => ({ codigoPeca: c.codigoPeca, descricao: c.descricao, categoria: "", condicao: "Testada OK", quantidade: 1, destino: "Uso Interno", valorVenda: "" })));
+      setPecas(bom.map((c) => ({ codigoPeca: c.codigoPeca, descricao: c.descricao, categoria: "", condicao: "Testada OK", quantidade, destino: "Uso Interno", valorVenda: "" })));
       setBomCarregado(true);
     } else {
-      setPecas([{ ...pecaVazia }]);
+      setPecas([{ ...pecaVazia, quantidade }]);
       setBomCarregado(false);
     }
+  }
+
+  function escolherGrupo(g) {
+    setGrupoSelKey(g.key);
+    setQtdDesmontar(g.produtos.length);
+    carregarPecasParaGrupo(g.codigoFornecedor, g.produtos.length);
   }
 
   function updatePeca(i, k, v) {
@@ -2142,7 +2154,8 @@ function Desmontagem({ db, onSubmit, onSalvarComponentes, onExcluirComponentes }
     setPecas(copy);
   }
   function addPeca() {
-    setPecas([...pecas, { ...pecaVazia }]);
+    // duplica com quantidade 0 pra facilitar dividir uma mesma peça entre destinos diferentes (ex: 3 pra sucata, 2 pra outro destino)
+    setPecas([...pecas, { ...pecaVazia, quantidade: "" }]);
   }
   function removePeca(i) {
     setPecas(pecas.filter((_, idx) => idx !== i));
@@ -2150,9 +2163,11 @@ function Desmontagem({ db, onSubmit, onSalvarComponentes, onExcluirComponentes }
 
   function submit(e) {
     e.preventDefault();
-    if (!produtoId || !tecnico || pecas.some((p) => !p.descricao)) return;
-    onSubmit({ produtoId, tecnico, semAproveitamento }, pecas);
-    setProdutoId(""); setTecnico(""); setSemAproveitamento(""); setGrupoAbertoKey(""); setBomCarregado(false);
+    if (!grupoSelecionado || !tecnico || pecas.some((p) => !p.descricao)) return;
+    const qtd = Math.max(1, Math.min(qtdDesmontar, grupoSelecionado.produtos.length));
+    const produtoIds = grupoSelecionado.produtos.slice(0, qtd).map((p) => p.id);
+    onSubmit({ produtoIds, tecnico, semAproveitamento }, pecas);
+    setGrupoSelKey(""); setTecnico(""); setSemAproveitamento(""); setBomCarregado(false); setBuscaGrupo("");
     setPecas([{ ...pecaVazia }]);
   }
 
@@ -2169,46 +2184,54 @@ function Desmontagem({ db, onSubmit, onSalvarComponentes, onExcluirComponentes }
         </button>
       </div>
       <p className="text-sm text-slate-500 mb-4">{elegiveis.length} unidade(s) aguardando desmontagem, em {listaGrupos.length} código(s) diferente(s).</p>
+
+      {!grupoSelecionado ? (
+        <div>
+          <div className="relative mb-2">
+            <Search size={15} className="absolute left-2.5 top-2.5 text-slate-400" />
+            <input className={inputCls + " pl-8"} placeholder="Digite o código do fornecedor (SKU)..." value={buscaGrupo} onChange={(e) => setBuscaGrupo(e.target.value)} />
+          </div>
+          <div className="border border-slate-200 rounded-lg max-h-64 overflow-y-auto">
+            {gruposFiltrados.length === 0 && (
+              <div className="px-3 py-2.5 text-sm text-slate-500">
+                {buscaGrupo.trim() ? "Nenhuma unidade aguardando desmontagem com esse código no momento." : "Nenhuma unidade aguardando desmontagem no momento."}
+                {buscaGrupo.trim() && db.componentes.some((c) => c.codigoFornecedor.toLowerCase().includes(buscaGrupo.toLowerCase())) && (
+                  <div className="mt-1 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+                    Esse código já tem componentes cadastrados — falta uma unidade física passar pela Triagem e ser marcada como "Desmontado" para poder aparecer aqui.
+                  </div>
+                )}
+              </div>
+            )}
+            {gruposFiltrados.map((g) => (
+              <button type="button" key={g.key} onClick={() => escolherGrupo(g)}
+                className="w-full text-left px-3 py-2.5 text-sm hover:bg-slate-50 border-b border-slate-100 last:border-0 flex items-center justify-between">
+                <span><span className="font-mono font-medium">{g.codigoFornecedor}</span><span className="text-slate-500"> — {g.descricao}</span></span>
+                <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">{g.produtos.length} un.</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : (
       <form onSubmit={submit} className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
-          <div className="col-span-2">
-            <Field label="Produto — busque pelo código do fornecedor">
-              <div className="relative">
-                <Search size={15} className="absolute left-2.5 top-2.5 text-slate-400" />
-                <input
-                  className={inputCls + " pl-8"}
-                  placeholder="Digite o código do fornecedor (SKU)..."
-                  value={produtoSelecionado ? `${produtoSelecionado.codigoFornecedor} — ${produtoSelecionado.descricao} (${produtoSelecionado.id})` : buscaGrupo}
-                  onChange={(e) => { setBuscaGrupo(e.target.value); setProdutoId(""); setGrupoAbertoKey(""); }}
-                  onFocus={() => { if (produtoSelecionado) { setProdutoId(""); setBuscaGrupo(""); } }}
-                />
-              </div>
-            </Field>
-            {!produtoSelecionado && buscaGrupo.trim() && !grupoAberto && (
-              <div className="mt-1 border border-slate-300 rounded-lg shadow-sm max-h-48 overflow-y-auto">
-                {gruposFiltrados.length === 0 && <div className="px-3 py-2 text-sm text-slate-400">Nenhum código aguardando desmontagem com esse termo.</div>}
-                {gruposFiltrados.map((g) => (
-                  <button type="button" key={g.key} onClick={() => { if (g.produtos.length === 1) { setProdutoId(g.produtos[0].id); setBuscaGrupo(""); carregarPecasParaProduto(g.produtos[0]); } else { setGrupoAbertoKey(g.key); } }}
-                    className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 border-b border-slate-100 last:border-0 flex items-center justify-between">
-                    <span><span className="font-mono font-medium">{g.codigoFornecedor}</span><span className="text-slate-500"> — {g.descricao}</span></span>
-                    <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">{g.produtos.length} un.</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            {grupoAberto && !produtoSelecionado && (
-              <div className="mt-1 border border-amber-300 bg-amber-50 rounded-lg p-2">
-                <div className="text-xs text-amber-800 mb-1.5">{grupoAberto.produtos.length} unidades disponíveis deste código — escolha qual desmontar:</div>
-                <div className="flex flex-wrap gap-1.5">
-                  {grupoAberto.produtos.map((p) => (
-                    <button type="button" key={p.id} onClick={() => { setProdutoId(p.id); setGrupoAbertoKey(""); carregarPecasParaProduto(p); }} className="text-xs bg-white border border-slate-300 rounded-lg px-2 py-1 hover:bg-slate-50 font-mono">
-                      {p.id}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
+          <div className="col-span-2 flex items-center justify-between bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5">
+            <div className="text-sm">
+              <span className="font-mono font-medium">{grupoSelecionado.codigoFornecedor}</span> — {grupoSelecionado.descricao}
+              <div className="text-xs text-slate-400">Lote {grupoSelecionado.lote} · {grupoSelecionado.produtos.length} unidade(s) disponível(is) para desmontagem</div>
+            </div>
+            <button type="button" onClick={() => { setGrupoSelKey(""); setBuscaGrupo(""); }} className="text-xs text-slate-500 hover:underline">Trocar SKU</button>
           </div>
+          <Field label={`Quantidade a desmontar juntas (máx. ${grupoSelecionado.produtos.length})`}>
+            <input
+              type="number" min="1" max={grupoSelecionado.produtos.length} className={inputCls}
+              value={qtdDesmontar}
+              onChange={(e) => {
+                const v = Math.max(1, Math.min(parseInt(e.target.value, 10) || 1, grupoSelecionado.produtos.length));
+                setQtdDesmontar(v);
+                carregarPecasParaGrupo(grupoSelecionado.codigoFornecedor, v);
+              }}
+            />
+          </Field>
           <Field label="Técnico Responsável"><input className={inputCls} value={tecnico} onChange={(e) => setTecnico(e.target.value)} required /></Field>
         </div>
 
@@ -2220,7 +2243,7 @@ function Desmontagem({ db, onSubmit, onSalvarComponentes, onExcluirComponentes }
           <div className="space-y-2">
             {pecas.map((p, i) => (
               <div key={i} className="border border-slate-200 rounded-lg p-2.5 bg-slate-50">
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-2">
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mb-2">
                   <div>
                     <label className="text-xs text-slate-500 block mb-0.5">Código da Peça</label>
                     <input className={inputCls + " text-sm font-mono"} placeholder="Código" value={p.codigoPeca} onChange={(e) => updatePeca(i, "codigoPeca", e.target.value)} />
@@ -2229,16 +2252,6 @@ function Desmontagem({ db, onSubmit, onSalvarComponentes, onExcluirComponentes }
                     <label className="text-xs text-slate-500 block mb-0.5">Descrição</label>
                     <input className={inputCls + " text-sm"} placeholder="Descrição da peça" value={p.descricao} onChange={(e) => updatePeca(i, "descricao", e.target.value)} />
                   </div>
-                  <div>
-                    <label className="text-xs text-slate-500 block mb-0.5">Categoria</label>
-                    <input className={inputCls + " text-sm"} placeholder="Categoria" value={p.categoria} onChange={(e) => updatePeca(i, "categoria", e.target.value)} />
-                  </div>
-                  <div>
-                    <label className="text-xs text-slate-500 block mb-0.5">Condição</label>
-                    <select className={inputCls + " text-sm"} value={p.condicao} onChange={(e) => updatePeca(i, "condicao", e.target.value)}>
-                      <option>Nova</option><option>Seminova</option><option>Testada OK</option>
-                    </select>
-                  </div>
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2 items-end">
                   <div>
@@ -2246,18 +2259,16 @@ function Desmontagem({ db, onSubmit, onSalvarComponentes, onExcluirComponentes }
                     <input type="number" min="1" className={inputCls + " text-sm"} value={p.quantidade} onChange={(e) => updatePeca(i, "quantidade", e.target.value)} />
                   </div>
                   <div>
+                    <label className="text-xs text-slate-500 block mb-0.5">Condição</label>
+                    <select className={inputCls + " text-sm"} value={p.condicao} onChange={(e) => updatePeca(i, "condicao", e.target.value)}>
+                      <option>Nova</option><option>Seminova</option><option>Testada OK</option>
+                    </select>
+                  </div>
+                  <div>
                     <label className="text-xs text-slate-500 block mb-0.5">Destino</label>
                     <select className={inputCls + " text-sm"} value={p.destino} onChange={(e) => updatePeca(i, "destino", e.target.value)}>
                       <option>Uso Interno</option><option>Venda Loja Física</option><option>Venda Loja Virtual</option><option>Sucata</option>
                     </select>
-                  </div>
-                  <div>
-                    <label className="text-xs text-slate-500 block mb-0.5">Valor de Venda (R$)</label>
-                    {p.destino === "Sucata" ? (
-                      <div className="text-xs text-slate-400 italic px-1 py-2">Sem valor (sucata)</div>
-                    ) : (
-                      <input type="number" step="0.01" className={inputCls + " text-sm"} placeholder="0,00" value={p.valorVenda} onChange={(e) => updatePeca(i, "valorVenda", e.target.value)} />
-                    )}
                   </div>
                   <div className="flex justify-end">
                     <button type="button" onClick={() => removePeca(i)} className="text-rose-500 hover:text-rose-700 flex items-center gap-1 text-xs px-2 py-2">
@@ -2274,9 +2285,10 @@ function Desmontagem({ db, onSubmit, onSalvarComponentes, onExcluirComponentes }
         <Field label="Peças sem aproveitamento (opcional)"><input className={inputCls} value={semAproveitamento} onChange={(e) => setSemAproveitamento(e.target.value)} /></Field>
 
         <button type="submit" className="brand-btn rounded-lg px-4 py-2.5 text-sm font-medium">
-          Registrar Ordem de Desmontagem
+          Registrar Desmontagem de {Math.max(1, Math.min(qtdDesmontar, grupoSelecionado.produtos.length))} unidade(s)
         </button>
       </form>
+      )}
     </Card>
   );
 }
