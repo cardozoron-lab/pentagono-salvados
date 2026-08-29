@@ -4,7 +4,7 @@ import {
   PackageSearch, Archive, History, AlertTriangle, CheckCircle2,
   Plus, Trash2, Search, RefreshCw, Loader2, FileSpreadsheet,
   Download, Upload, FileDown, Printer, Settings, ShieldAlert, Layers,
-  ArrowLeftRight, ListChecks
+  ArrowLeftRight, ListChecks, FileText
 } from "lucide-react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
@@ -32,6 +32,7 @@ const STATUS_STYLES = {
   "Recuperado": "bg-emerald-100 text-emerald-800 border-emerald-300",
   "Vendido": "bg-sky-100 text-sky-800 border-sky-300",
   "Descarte": "bg-rose-100 text-rose-800 border-rose-300",
+  "Sucateada": "bg-rose-100 text-rose-800 border-rose-300",
 };
 
 function todayStr() {
@@ -59,6 +60,7 @@ const emptyDB = {
   historico: [],
   pecasFaltantes: [],
   pecasBoas: [],
+  componentes: [],
   contadores: { tri: 0, od: 0, req: 0, pc: 0, mov: 0, nec: 0, trf: 0, vda: 0, aj: 0 },
 };
 
@@ -394,18 +396,20 @@ export default function SalvadosApp() {
     pecas.forEach((peca) => {
       const pcId = "PC-" + pad4(next.contadores.pc + 1);
       next.contadores.pc += 1;
+      const ehSucata = peca.destino === "Sucata";
       next.pecasBoas = [
         {
           id: pcId,
           produtoOrigemId: produto.id,
           ordemDesmontagemId: odId,
+          codigoPeca: peca.codigoPeca || "",
           descricao: peca.descricao,
           categoria: peca.categoria,
           condicao: peca.condicao,
           quantidade: parseInt(peca.quantidade, 10) || 1,
           destinoPrevisto: peca.destino,
-          valorVenda: parseFloat(peca.valorVenda) || 0,
-          status: "Disponível",
+          valorVenda: ehSucata ? 0 : (parseFloat(peca.valorVenda) || 0),
+          status: ehSucata ? "Sucateada" : "Disponível",
           dataEntrada: todayStr(),
         },
         ...next.pecasBoas,
@@ -704,6 +708,29 @@ export default function SalvadosApp() {
     return pcId;
   }
 
+  async function salvarComponentes(codigoFornecedor, linhas) {
+    const next = await fetchLatestDb();
+    // remove o cadastro antigo desse código e substitui pelo novo (permite corrigir facilmente colando de novo)
+    next.componentes = next.componentes.filter((c) => c.codigoFornecedor !== codigoFornecedor);
+    linhas.forEach((l) => {
+      next.componentes.push({
+        codigoFornecedor,
+        codigoPeca: l.codigoPeca,
+        descricao: l.descricao,
+      });
+    });
+    await persist(next);
+    showToast(`${linhas.length} componente(s) salvo(s) para o código ${codigoFornecedor}.`);
+    return linhas.length;
+  }
+
+  async function excluirComponentesDoCodigo(codigoFornecedor) {
+    const next = await fetchLatestDb();
+    next.componentes = next.componentes.filter((c) => c.codigoFornecedor !== codigoFornecedor);
+    await persist(next);
+    showToast(`Cadastro de componentes de ${codigoFornecedor} removido.`);
+  }
+
   if (loading) {
     return (
       <div className="loading-min-h flex items-center justify-center text-slate-500 gap-2">
@@ -729,7 +756,7 @@ export default function SalvadosApp() {
     { id: "desmontagem", label: "Desmontagem", icon: Wrench, categoria: "Entrada / Saída" },
 
     { id: "historico", label: "Histórico", icon: History, categoria: "Sistema" },
-    { id: "imprimir", label: "Imprimir", icon: Printer, categoria: "Sistema" },
+    { id: "imprimir", label: "Relatórios", icon: FileText, categoria: "Sistema" },
     { id: "config", label: "Configurações", icon: Settings, categoria: "Sistema" },
   ];
   const CATEGORIAS_ORDEM = ["Operação", "Estoque", "Entrada / Saída", "Sistema"];
@@ -765,7 +792,7 @@ export default function SalvadosApp() {
           </div>
         </div>
         <div className="text-xs brand-subtext-color flex items-center gap-2">
-          <span className="opacity-60 font-mono">v2026.08.18-3-fases-4-5-6</span>
+          <span className="opacity-60 font-mono">v2026.08.18-5-fix-componentes</span>
           {saving ? <><RefreshCw size={12} className="animate-spin" /> salvando...</> : <>dados salvados</>}
         </div>
       </header>
@@ -804,7 +831,7 @@ export default function SalvadosApp() {
         {tab === "dados" && <ImportarExportar db={db} onImportarCSV={processarLoteEmMassa} showToast={showToast} />}
         {tab === "produtos" && <Produtos db={db} />}
         {tab === "triagem" && <Triagem db={db} onSubmit={registrarTriagem} onSubmitLote={registrarTriagemLote} />}
-        {tab === "desmontagem" && <Desmontagem db={db} onSubmit={registrarDesmontagem} />}
+        {tab === "desmontagem" && <Desmontagem db={db} onSubmit={registrarDesmontagem} onSalvarComponentes={salvarComponentes} onExcluirComponentes={excluirComponentesDoCodigo} />}
         {tab === "requisicao" && (
           <Requisicao
             db={db}
@@ -2072,12 +2099,15 @@ function Triagem({ db, onSubmit, onSubmitLote }) {
 
 // ---------------- DESMONTAGEM ----------------
 
-function Desmontagem({ db, onSubmit }) {
+function Desmontagem({ db, onSubmit, onSalvarComponentes, onExcluirComponentes }) {
+  const [modo, setModo] = useState("desmontar");
   const elegiveis = db.produtos.filter((p) => p.status === "Aguardando Desmontagem");
   const [produtoId, setProdutoId] = useState("");
   const [tecnico, setTecnico] = useState("");
   const [semAproveitamento, setSemAproveitamento] = useState("");
-  const [pecas, setPecas] = useState([{ descricao: "", categoria: "", condicao: "Testada OK", quantidade: 1, destino: "Uso Interno", valorVenda: "" }]);
+  const pecaVazia = { codigoPeca: "", descricao: "", categoria: "", condicao: "Testada OK", quantidade: 1, destino: "Uso Interno", valorVenda: "" };
+  const [pecas, setPecas] = useState([{ ...pecaVazia }]);
+  const [bomCarregado, setBomCarregado] = useState(false);
 
   const [buscaGrupo, setBuscaGrupo] = useState("");
   const [grupoAbertoKey, setGrupoAbertoKey] = useState("");
@@ -2095,13 +2125,24 @@ function Desmontagem({ db, onSubmit }) {
   const grupoAberto = listaGrupos.find((g) => g.key === grupoAbertoKey);
   const produtoSelecionado = elegiveis.find((p) => p.id === produtoId);
 
+  function carregarPecasParaProduto(produto) {
+    const bom = db.componentes.filter((c) => c.codigoFornecedor === produto.codigoFornecedor);
+    if (bom.length > 0) {
+      setPecas(bom.map((c) => ({ codigoPeca: c.codigoPeca, descricao: c.descricao, categoria: "", condicao: "Testada OK", quantidade: 1, destino: "Uso Interno", valorVenda: "" })));
+      setBomCarregado(true);
+    } else {
+      setPecas([{ ...pecaVazia }]);
+      setBomCarregado(false);
+    }
+  }
+
   function updatePeca(i, k, v) {
     const copy = [...pecas];
     copy[i] = { ...copy[i], [k]: v };
     setPecas(copy);
   }
   function addPeca() {
-    setPecas([...pecas, { descricao: "", categoria: "", condicao: "Testada OK", quantidade: 1, destino: "Uso Interno", valorVenda: "" }]);
+    setPecas([...pecas, { ...pecaVazia }]);
   }
   function removePeca(i) {
     setPecas(pecas.filter((_, idx) => idx !== i));
@@ -2111,13 +2152,22 @@ function Desmontagem({ db, onSubmit }) {
     e.preventDefault();
     if (!produtoId || !tecnico || pecas.some((p) => !p.descricao)) return;
     onSubmit({ produtoId, tecnico, semAproveitamento }, pecas);
-    setProdutoId(""); setTecnico(""); setSemAproveitamento(""); setGrupoAbertoKey("");
-    setPecas([{ descricao: "", categoria: "", condicao: "Testada OK", quantidade: 1, destino: "Uso Interno", valorVenda: "" }]);
+    setProdutoId(""); setTecnico(""); setSemAproveitamento(""); setGrupoAbertoKey(""); setBomCarregado(false);
+    setPecas([{ ...pecaVazia }]);
+  }
+
+  if (modo === "componentes") {
+    return <CadastroComponentes db={db} onSalvar={onSalvarComponentes} onExcluir={onExcluirComponentes} onVoltar={() => setModo("desmontar")} />;
   }
 
   return (
     <Card className="p-5 max-w-3xl">
-      <h2 className="font-semibold mb-1">Ordem de Desmontagem</h2>
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="font-semibold">Ordem de Desmontagem</h2>
+        <button onClick={() => setModo("componentes")} className="text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 hover:bg-slate-50 flex items-center gap-1.5">
+          <ListChecks size={13} /> Cadastrar Componentes de um Código
+        </button>
+      </div>
       <p className="text-sm text-slate-500 mb-4">{elegiveis.length} unidade(s) aguardando desmontagem, em {listaGrupos.length} código(s) diferente(s).</p>
       <form onSubmit={submit} className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
@@ -2138,7 +2188,7 @@ function Desmontagem({ db, onSubmit }) {
               <div className="mt-1 border border-slate-300 rounded-lg shadow-sm max-h-48 overflow-y-auto">
                 {gruposFiltrados.length === 0 && <div className="px-3 py-2 text-sm text-slate-400">Nenhum código aguardando desmontagem com esse termo.</div>}
                 {gruposFiltrados.map((g) => (
-                  <button type="button" key={g.key} onClick={() => { if (g.produtos.length === 1) { setProdutoId(g.produtos[0].id); setBuscaGrupo(""); } else { setGrupoAbertoKey(g.key); } }}
+                  <button type="button" key={g.key} onClick={() => { if (g.produtos.length === 1) { setProdutoId(g.produtos[0].id); setBuscaGrupo(""); carregarPecasParaProduto(g.produtos[0]); } else { setGrupoAbertoKey(g.key); } }}
                     className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 border-b border-slate-100 last:border-0 flex items-center justify-between">
                     <span><span className="font-mono font-medium">{g.codigoFornecedor}</span><span className="text-slate-500"> — {g.descricao}</span></span>
                     <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">{g.produtos.length} un.</span>
@@ -2151,7 +2201,7 @@ function Desmontagem({ db, onSubmit }) {
                 <div className="text-xs text-amber-800 mb-1.5">{grupoAberto.produtos.length} unidades disponíveis deste código — escolha qual desmontar:</div>
                 <div className="flex flex-wrap gap-1.5">
                   {grupoAberto.produtos.map((p) => (
-                    <button type="button" key={p.id} onClick={() => { setProdutoId(p.id); setGrupoAbertoKey(""); }} className="text-xs bg-white border border-slate-300 rounded-lg px-2 py-1 hover:bg-slate-50 font-mono">
+                    <button type="button" key={p.id} onClick={() => { setProdutoId(p.id); setGrupoAbertoKey(""); carregarPecasParaProduto(p); }} className="text-xs bg-white border border-slate-300 rounded-lg px-2 py-1 hover:bg-slate-50 font-mono">
                       {p.id}
                     </button>
                   ))}
@@ -2163,21 +2213,58 @@ function Desmontagem({ db, onSubmit }) {
         </div>
 
         <div className="border border-slate-200 rounded-lg p-3">
-          <div className="text-sm font-medium mb-2">Peças retiradas</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-medium">Peças retiradas</div>
+            {bomCarregado && <span className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">✓ Lista pré-preenchida do cadastro de componentes</span>}
+          </div>
           <div className="space-y-2">
             {pecas.map((p, i) => (
-              <div key={i} className="grid grid-cols-12 gap-1.5 items-center">
-                <input className={inputCls + " col-span-3"} placeholder="Descrição" value={p.descricao} onChange={(e) => updatePeca(i, "descricao", e.target.value)} />
-                <input className={inputCls + " col-span-2"} placeholder="Categoria" value={p.categoria} onChange={(e) => updatePeca(i, "categoria", e.target.value)} />
-                <select className={inputCls + " col-span-2"} value={p.condicao} onChange={(e) => updatePeca(i, "condicao", e.target.value)}>
-                  <option>Nova</option><option>Seminova</option><option>Testada OK</option>
-                </select>
-                <input type="number" min="1" className={inputCls + " col-span-1"} value={p.quantidade} onChange={(e) => updatePeca(i, "quantidade", e.target.value)} />
-                <select className={inputCls + " col-span-2"} value={p.destino} onChange={(e) => updatePeca(i, "destino", e.target.value)}>
-                  <option>Uso Interno</option><option>Venda Loja Física</option><option>Venda Loja Virtual</option>
-                </select>
-                <input type="number" step="0.01" className={inputCls + " col-span-1"} placeholder="R$" value={p.valorVenda} onChange={(e) => updatePeca(i, "valorVenda", e.target.value)} />
-                <button type="button" onClick={() => removePeca(i)} className="col-span-1 text-rose-500 hover:text-rose-700 flex justify-center"><Trash2 size={16} /></button>
+              <div key={i} className="border border-slate-200 rounded-lg p-2.5 bg-slate-50">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-2">
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-0.5">Código da Peça</label>
+                    <input className={inputCls + " text-sm font-mono"} placeholder="Código" value={p.codigoPeca} onChange={(e) => updatePeca(i, "codigoPeca", e.target.value)} />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="text-xs text-slate-500 block mb-0.5">Descrição</label>
+                    <input className={inputCls + " text-sm"} placeholder="Descrição da peça" value={p.descricao} onChange={(e) => updatePeca(i, "descricao", e.target.value)} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-0.5">Categoria</label>
+                    <input className={inputCls + " text-sm"} placeholder="Categoria" value={p.categoria} onChange={(e) => updatePeca(i, "categoria", e.target.value)} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-0.5">Condição</label>
+                    <select className={inputCls + " text-sm"} value={p.condicao} onChange={(e) => updatePeca(i, "condicao", e.target.value)}>
+                      <option>Nova</option><option>Seminova</option><option>Testada OK</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 items-end">
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-0.5">Quantidade</label>
+                    <input type="number" min="1" className={inputCls + " text-sm"} value={p.quantidade} onChange={(e) => updatePeca(i, "quantidade", e.target.value)} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-0.5">Destino</label>
+                    <select className={inputCls + " text-sm"} value={p.destino} onChange={(e) => updatePeca(i, "destino", e.target.value)}>
+                      <option>Uso Interno</option><option>Venda Loja Física</option><option>Venda Loja Virtual</option><option>Sucata</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-0.5">Valor de Venda (R$)</label>
+                    {p.destino === "Sucata" ? (
+                      <div className="text-xs text-slate-400 italic px-1 py-2">Sem valor (sucata)</div>
+                    ) : (
+                      <input type="number" step="0.01" className={inputCls + " text-sm"} placeholder="0,00" value={p.valorVenda} onChange={(e) => updatePeca(i, "valorVenda", e.target.value)} />
+                    )}
+                  </div>
+                  <div className="flex justify-end">
+                    <button type="button" onClick={() => removePeca(i)} className="text-rose-500 hover:text-rose-700 flex items-center gap-1 text-xs px-2 py-2">
+                      <Trash2 size={15} /> Remover
+                    </button>
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -2190,6 +2277,132 @@ function Desmontagem({ db, onSubmit }) {
           Registrar Ordem de Desmontagem
         </button>
       </form>
+    </Card>
+  );
+}
+
+function CadastroComponentes({ db, onSalvar, onExcluir, onVoltar }) {
+  const [codigo, setCodigo] = useState("");
+  const [texto, setTexto] = useState("");
+  const [salvando, setSalvando] = useState(false);
+  const [confirmacao, setConfirmacao] = useState(null);
+
+  const codigosConhecidos = [...new Set(db.produtos.map((p) => p.codigoFornecedor))].sort();
+
+  const cadastrados = {};
+  db.componentes.forEach((c) => {
+    if (!cadastrados[c.codigoFornecedor]) cadastrados[c.codigoFornecedor] = [];
+    cadastrados[c.codigoFornecedor].push(c);
+  });
+  const codigosCadastrados = Object.keys(cadastrados).sort();
+
+  function parseTexto(txt) {
+    return txt.split("\n").map((linha) => linha.trim()).filter(Boolean).map((linha) => {
+      // aceita colado do Excel (separado por Tab) ou digitado com ; — sempre Código + Descrição
+      const partes = linha.includes("\t") ? linha.split("\t") : linha.split(";");
+      const codigoPeca = (partes[0] || "").trim();
+      const descricao = (partes.slice(1).join(" ") || "").trim();
+      return { codigoPeca, descricao: descricao || codigoPeca };
+    }).filter((l) => l.codigoPeca);
+  }
+
+  const preview = texto.trim() ? parseTexto(texto) : [];
+
+  async function salvar() {
+    if (!codigo.trim() || preview.length === 0) return;
+    setSalvando(true);
+    try {
+      await onSalvar(codigo.trim(), preview);
+      setConfirmacao({ erro: false, msg: `${preview.length} componente(s) salvo(s) para ${codigo.trim()}.` });
+      setTexto("");
+      setCodigo("");
+    } catch (err) {
+      setConfirmacao({ erro: true, msg: "Não foi possível salvar: " + (err?.message || "erro desconhecido") });
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  return (
+    <Card className="p-5 max-w-3xl">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="font-semibold">Cadastro de Componentes por Código</h2>
+        <button onClick={onVoltar} className="text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 hover:bg-slate-50">← Voltar para Desmontagem</button>
+      </div>
+      <p className="text-sm text-slate-500 mb-4">
+        Cadastre quais peças normalmente compõem cada código de produto (código da peça + descrição). Depois, ao escolher esse
+        produto na Desmontagem, a lista de peças já vem preenchida sozinha — a quantidade de cada uma você ajusta na hora.
+      </p>
+
+      {confirmacao && (
+        <div className={`rounded-lg p-3 mb-4 border text-sm ${confirmacao.erro ? "bg-rose-50 border-rose-300 text-rose-800" : "bg-emerald-50 border-emerald-300 text-emerald-800"}`}>
+          {confirmacao.msg}
+        </div>
+      )}
+
+      <div className="mb-3">
+        <Field label="Código do Produto (SKU)">
+          <input list="lista-codigos-componentes" className={inputCls} value={codigo} onChange={(e) => setCodigo(e.target.value)} placeholder="Digite ou escolha o código do produto..." />
+          <datalist id="lista-codigos-componentes">
+            {codigosConhecidos.map((c) => <option key={c} value={c} />)}
+          </datalist>
+        </Field>
+      </div>
+
+      <Field label="Cole a lista de peças que compõem esse produto (Código da Peça + Descrição)">
+        <textarea
+          className={inputCls + " font-mono text-xs"}
+          rows={10}
+          placeholder={"0071-01\tPE DE BORRACHA CZ\n0091-02\tCABO PLUG 1,2M 2 X 0,5MM² BR (IMP)\n0303-01\tJARRA CRISTAL VD C/ ALÇA BR"}
+          value={texto}
+          onChange={(e) => setTexto(e.target.value)}
+        />
+      </Field>
+      <p className="text-xs text-slate-400 mt-1 mb-3">
+        Cole direto do Excel (selecione as duas colunas — Código e Descrição — e cole aqui), uma peça por linha. A quantidade
+        de cada peça não é cadastrada aqui, ela é informada na hora da desmontagem em si.
+      </p>
+
+      {preview.length > 0 && (
+        <div className="border border-slate-200 rounded-lg overflow-hidden mb-3 max-h-64 overflow-y-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-slate-50 text-left text-slate-500 sticky top-0">
+                <th className="py-1.5 px-2 w-28">Código da Peça</th><th className="py-1.5 px-2">Descrição</th>
+              </tr>
+            </thead>
+            <tbody>
+              {preview.map((p, i) => (
+                <tr key={i} className="border-t border-slate-100">
+                  <td className="py-1 px-2 font-mono">{p.codigoPeca}</td>
+                  <td className="py-1 px-2">{p.descricao}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <button onClick={salvar} disabled={salvando || !codigo.trim() || preview.length === 0} className="brand-btn rounded-lg px-4 py-2.5 text-sm font-medium disabled:opacity-60 flex items-center gap-1.5 mb-6">
+        {salvando ? <><Loader2 size={15} className="animate-spin" /> Salvando...</> : <>💾 Salvar {preview.length > 0 ? preview.length + " " : ""}componente(s){codigo ? " para " + codigo : ""}</>}
+      </button>
+
+      {codigosCadastrados.length > 0 && (
+        <div>
+          <h3 className="text-sm font-medium mb-2">Códigos já cadastrados ({codigosCadastrados.length})</h3>
+          <div className="space-y-2">
+            {codigosCadastrados.map((cod) => (
+              <div key={cod} className="border border-slate-200 rounded-lg p-2.5">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-mono text-sm font-medium">{cod}</span>
+                  <button onClick={() => onExcluir(cod)} className="text-xs text-rose-600 hover:underline">Excluir cadastro</button>
+                </div>
+                <div className="text-xs text-slate-500">{cadastrados[cod].length} peça(s): {cadastrados[cod].map((c) => `${c.codigoPeca} — ${c.descricao}`).join(" · ")}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </Card>
   );
 }
@@ -2441,6 +2654,7 @@ function PecasBoas({ db, onAdicionarAvulsa, showToast }) {
             <thead>
               <tr className="text-left text-xs text-slate-500 border-b border-slate-200">
                 <th className="py-2 pr-3">ID Peça</th>
+                <th className="py-2 pr-3">Código</th>
                 <th className="py-2 pr-3">Descrição</th>
                 <th className="py-2 pr-3">Origem</th>
                 <th className="py-2 pr-3">Condição</th>
@@ -2453,6 +2667,7 @@ function PecasBoas({ db, onAdicionarAvulsa, showToast }) {
               {filtradas.map((p) => (
                 <tr key={p.id} className="border-b border-slate-100 last:border-0">
                   <td className="py-2 pr-3 font-mono text-xs">{p.id}</td>
+                  <td className="py-2 pr-3 font-mono text-xs">{p.codigoPeca || "-"}</td>
                   <td className="py-2 pr-3">{p.descricao}</td>
                   <td className="py-2 pr-3 font-mono text-xs text-slate-400">{p.produtoOrigemId}</td>
                   <td className="py-2 pr-3">{p.condicao}</td>
@@ -2462,7 +2677,7 @@ function PecasBoas({ db, onAdicionarAvulsa, showToast }) {
                 </tr>
               ))}
               {filtradas.length === 0 && (
-                <tr><td colSpan={7} className="py-8 text-center text-slate-400">Nenhuma peça no estoque ainda.</td></tr>
+                <tr><td colSpan={8} className="py-8 text-center text-slate-400">Nenhuma peça no estoque ainda.</td></tr>
               )}
             </tbody>
           </table>
@@ -3076,9 +3291,9 @@ function gerarHtmlImpressao(tipo) {
   return `<html><head><title>${titulo}</title><style>${style}</style></head><body>${corpo}</body></html>`;
 }
 
-function agruparRecuperados(produtos) {
+function agruparPorStatusFinanceiro(produtos, status) {
   const grupos = {};
-  produtos.filter((p) => p.status === "Recuperado").forEach((p) => {
+  produtos.filter((p) => p.status === status).forEach((p) => {
     const key = p.codigoFornecedor + "|" + p.descricao;
     if (!grupos[key]) grupos[key] = { codigoFornecedor: p.codigoFornecedor, descricao: p.descricao, quantidade: 0, valorCustoTotal: 0, valorVendaTotal: 0 };
     grupos[key].quantidade += 1;
@@ -3094,15 +3309,22 @@ function agruparRecuperados(produtos) {
     }))
     .sort((a, b) => b.quantidade - a.quantidade);
 }
+function agruparRecuperados(produtos) { return agruparPorStatusFinanceiro(produtos, "Recuperado"); }
+function agruparVendas(produtos) { return agruparPorStatusFinanceiro(produtos, "Vendido"); }
 
 const RECUPERADOS_EXPORT_MAP = {
   codigoFornecedor: "Código_Fornecedor", descricao: "Descrição", quantidade: "Quantidade",
   valorCustoUnitMedio: "Custo_Unitário_Médio", valorVendaUnitMedio: "Venda_Unitária_Média",
   valorCustoTotal: "Custo_Total", valorVendaTotal: "Venda_Total", valorBrutoTotal: "Valor_Bruto_Total",
 };
+const VENDAS_EXPORT_MAP = {
+  codigoFornecedor: "Código_Fornecedor", descricao: "Descrição", quantidade: "Quantidade_Vendida",
+  valorCustoUnitMedio: "Custo_Unitário_Médio", valorVendaUnitMedio: "Venda_Unitária_Média",
+  valorCustoTotal: "Custo_Total", valorVendaTotal: "Venda_Total", valorBrutoTotal: "Lucro_Total",
+};
 
-function gerarHtmlRecuperados(db) {
-  const linhas = agruparRecuperados(db.produtos);
+function gerarHtmlPorStatus(db, status, titulo) {
+  const linhas = agruparPorStatusFinanceiro(db.produtos, status);
   const totalUnidades = linhas.reduce((s, l) => s + l.quantidade, 0);
   const totalCusto = linhas.reduce((s, l) => s + l.valorCustoTotal, 0);
   const totalVenda = linhas.reduce((s, l) => s + l.valorVendaTotal, 0);
@@ -3117,7 +3339,7 @@ function gerarHtmlRecuperados(db) {
     tfoot td{font-weight:bold;border-top:2px solid #003D8D;}
     @media print { @page { size: A4 portrait; margin: 12mm; } }
   `;
-  let corpo = `<div class="barra"><div><h1>PENTÁGONO OUTLET DE ELETRODOMÉSTICOS</h1></div><div style="text-align:right"><h1>RELATÓRIO DE PRODUTOS RECUPERADOS</h1><p>Gerado em ${todayStr()} — agrupado por código</p></div></div>`;
+  let corpo = `<div class="barra"><div><h1>PENTÁGONO OUTLET DE ELETRODOMÉSTICOS</h1></div><div style="text-align:right"><h1>${titulo}</h1><p>Gerado em ${todayStr()} — agrupado por código</p></div></div>`;
   corpo += `<table><thead><tr><th>Código</th><th>Descrição</th><th>Qtd.</th><th>Custo Unit.</th><th>Venda Unit.</th><th>Custo Total</th><th>Venda Total</th><th>Valor Bruto</th></tr></thead><tbody>`;
   linhas.forEach((l) => {
     corpo += `<tr><td>${l.codigoFornecedor}</td><td>${l.descricao}</td><td class="num">${l.quantidade}</td>` +
@@ -3125,18 +3347,18 @@ function gerarHtmlRecuperados(db) {
       `<td class="num">R$ ${l.valorCustoTotal.toFixed(2)}</td><td class="num">R$ ${l.valorVendaTotal.toFixed(2)}</td>` +
       `<td class="num">R$ ${l.valorBrutoTotal.toFixed(2)}</td></tr>`;
   });
-  if (linhas.length === 0) corpo += `<tr><td colspan="8" style="text-align:center;color:#999;">Nenhum produto recuperado ainda.</td></tr>`;
+  if (linhas.length === 0) corpo += `<tr><td colspan="8" style="text-align:center;color:#999;">Nenhum produto encontrado ainda.</td></tr>`;
   corpo += `</tbody>`;
   if (linhas.length > 0) {
     corpo += `<tfoot><tr><td colspan="2">Total Geral</td><td class="num">${totalUnidades}</td><td></td><td></td>` +
       `<td class="num">R$ ${totalCusto.toFixed(2)}</td><td class="num">R$ ${totalVenda.toFixed(2)}</td><td class="num">R$ ${totalBruto.toFixed(2)}</td></tr></tfoot>`;
   }
   corpo += `</table>`;
-  return `<html><head><title>Relatório de Recuperados</title><style>${style}</style></head><body>${corpo}</body></html>`;
+  return `<html><head><title>${titulo}</title><style>${style}</style></head><body>${corpo}</body></html>`;
 }
 
-function RelatorioRecuperadosImpresso({ db }) {
-  const linhas = agruparRecuperados(db.produtos);
+function RelatorioFinanceiroImpresso({ db, status, titulo }) {
+  const linhas = agruparPorStatusFinanceiro(db.produtos, status);
   const totalUnidades = linhas.reduce((s, l) => s + l.quantidade, 0);
   const totalCusto = linhas.reduce((s, l) => s + l.valorCustoTotal, 0);
   const totalVenda = linhas.reduce((s, l) => s + l.valorVendaTotal, 0);
@@ -3145,7 +3367,7 @@ function RelatorioRecuperadosImpresso({ db }) {
 
   return (
     <div>
-      <ImpressoHeader title="RELATÓRIO DE PRODUTOS RECUPERADOS" subtitle={`Gerado em ${todayStr()} — agrupado por código, com valores`} />
+      <ImpressoHeader title={titulo} subtitle={`Gerado em ${todayStr()} — agrupado por código, com valores`} />
       <table className="w-full text-[10px] border-collapse border border-slate-400">
         <thead>
           <tr>
@@ -3173,7 +3395,7 @@ function RelatorioRecuperadosImpresso({ db }) {
             </tr>
           ))}
           {linhas.length === 0 && (
-            <tr><td colSpan={8} className="text-center py-4 text-slate-400 border border-slate-300">Nenhum produto recuperado ainda.</td></tr>
+            <tr><td colSpan={8} className="text-center py-4 text-slate-400 border border-slate-300">Nenhum produto encontrado ainda.</td></tr>
           )}
         </tbody>
         {linhas.length > 0 && (
@@ -3195,18 +3417,17 @@ function RelatorioRecuperadosImpresso({ db }) {
 }
 
 function Imprimir({ db }) {
-  const [formSel, setFormSel] = useState("triagem");
+  const [formSel, setFormSel] = useState("recuperados");
   const [avisoPopup, setAvisoPopup] = useState(false);
   const opcoes = [
-    { id: "triagem", label: "Mapa de Triagem" },
-    { id: "desmontagem", label: "Ordem de Desmontagem" },
-    { id: "requisicao", label: "Mapa de Requisição" },
-    { id: "recuperados", label: "Relatório de Recuperados" },
+    { id: "recuperados", label: "Relatório de Recuperados", status: "Recuperado", titulo: "RELATÓRIO DE PRODUTOS RECUPERADOS", exportMap: RECUPERADOS_EXPORT_MAP, arquivo: "relatorio_recuperados.csv" },
+    { id: "vendas", label: "Relatório de Vendas", status: "Vendido", titulo: "RELATÓRIO DE VENDAS", exportMap: VENDAS_EXPORT_MAP, arquivo: "relatorio_vendas.csv" },
   ];
+  const opcaoAtual = opcoes.find((o) => o.id === formSel);
 
   function abrirParaImprimir() {
     setAvisoPopup(false);
-    const html = formSel === "recuperados" ? gerarHtmlRecuperados(db) : gerarHtmlImpressao(formSel);
+    const html = gerarHtmlPorStatus(db, opcaoAtual.status, opcaoAtual.titulo);
     const win = window.open("", "_blank", "width=1000,height=700");
     if (!win) {
       setAvisoPopup(true);
@@ -3222,10 +3443,9 @@ function Imprimir({ db }) {
   return (
     <div className="space-y-4">
       <Card className="p-4 no-print">
-        <h2 className="font-semibold mb-1">Imprimir formulário em branco</h2>
+        <h2 className="font-semibold mb-1">Relatórios</h2>
         <p className="text-sm text-slate-500 mb-3">
-          Escolha o formulário e clique em Imprimir. Para uma versão com mais linhas por folha (formato paisagem já pronto),
-          use o PDF de formulários já gerado anteriormente.
+          Todos os relatórios do sistema ficam aqui — com valores de custo, venda e lucro, prontos para visualizar, imprimir ou exportar.
         </p>
         <div className="flex flex-wrap gap-2 mb-3">
           {opcoes.map((o) => (
@@ -3245,28 +3465,23 @@ function Imprimir({ db }) {
           <button onClick={abrirParaImprimir} className="text-sm border border-slate-300 rounded-lg px-4 py-2.5 hover:bg-slate-50 flex items-center gap-1.5">
             <Printer size={16} /> Abrir em nova janela para imprimir
           </button>
-          {formSel === "recuperados" && (
-            <button
-              onClick={() => downloadCSV("relatorio_recuperados.csv", mapRowsForExport(agruparRecuperados(db.produtos), RECUPERADOS_EXPORT_MAP))}
-              className="text-sm border border-slate-300 rounded-lg px-4 py-2.5 hover:bg-slate-50 flex items-center gap-1.5"
-            >
-              <Download size={16} /> Baixar como CSV
-            </button>
-          )}
+          <button
+            onClick={() => downloadCSV(opcaoAtual.arquivo, mapRowsForExport(agruparPorStatusFinanceiro(db.produtos, opcaoAtual.status), opcaoAtual.exportMap))}
+            className="text-sm border border-slate-300 rounded-lg px-4 py-2.5 hover:bg-slate-50 flex items-center gap-1.5"
+          >
+            <Download size={16} /> Baixar como CSV
+          </button>
         </div>
         {avisoPopup && (
           <div className="mt-3 text-sm text-amber-800 bg-amber-50 border border-amber-300 rounded-lg p-3">
             Seu navegador bloqueou a nova janela (pop-up). Procure um ícone de bloqueio na barra de endereço e permita
-            pop-ups para este site, depois tente de novo. Se continuar bloqueado, use o PDF de formulários já pronto.
+            pop-ups para este site, depois tente de novo.
           </div>
         )}
       </Card>
 
       <div className="print-page bg-white rounded-xl border border-slate-200 p-6">
-        {formSel === "triagem" && <FormularioTriagemImpresso />}
-        {formSel === "desmontagem" && <FormularioDesmontagemImpresso />}
-        {formSel === "requisicao" && <FormularioRequisicaoImpresso />}
-        {formSel === "recuperados" && <RelatorioRecuperadosImpresso db={db} />}
+        <RelatorioFinanceiroImpresso db={db} status={opcaoAtual.status} titulo={opcaoAtual.titulo} />
       </div>
     </div>
   );
