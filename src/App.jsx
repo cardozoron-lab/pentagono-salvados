@@ -799,7 +799,7 @@ export default function SalvadosApp() {
           </div>
         </div>
         <div className="text-xs brand-subtext-color flex items-center gap-2">
-          <span className="opacity-60 font-mono">v2026.08.18-7-desmontagem-em-lote</span>
+          <span className="opacity-60 font-mono">v2026.08.18-8-relatorios-sucateio-pecasboas</span>
           {saving ? <><RefreshCw size={12} className="animate-spin" /> salvando...</> : <>dados salvados</>}
         </div>
       </header>
@@ -3428,18 +3428,219 @@ function RelatorioFinanceiroImpresso({ db, status, titulo }) {
   );
 }
 
+function agruparPecasBoasDisponiveis(pecasBoas) {
+  const grupos = {};
+  pecasBoas.filter((p) => p.status === "Disponível").forEach((p) => {
+    const key = (p.codigoPeca || "-") + "|" + p.descricao;
+    if (!grupos[key]) grupos[key] = { codigoPeca: p.codigoPeca || "-", descricao: p.descricao, quantidade: 0, valorTotal: 0 };
+    grupos[key].quantidade += p.quantidade;
+    grupos[key].valorTotal += (p.valorVenda || 0) * p.quantidade;
+  });
+  return Object.values(grupos)
+    .map((g) => ({ ...g, valorUnitMedio: g.quantidade ? g.valorTotal / g.quantidade : 0 }))
+    .sort((a, b) => b.quantidade - a.quantidade);
+}
+
+const PECASBOAS_EXPORT_MAP = {
+  codigoPeca: "Código_Peça", descricao: "Descrição", quantidade: "Quantidade",
+  valorUnitMedio: "Valor_Unitário_Médio", valorTotal: "Valor_Total",
+};
+
+function agruparSucateio(produtos, pecasBoas) {
+  const linhas = [];
+  const gruposProd = {};
+  produtos.filter((p) => p.status === "Descarte").forEach((p) => {
+    const key = p.codigoFornecedor + "|" + p.descricao;
+    if (!gruposProd[key]) gruposProd[key] = { tipo: "Produto Descartado", codigo: p.codigoFornecedor, descricao: p.descricao, quantidade: 0, valorPerdido: 0 };
+    gruposProd[key].quantidade += 1;
+    gruposProd[key].valorPerdido += (p.valorCusto || 0);
+  });
+  linhas.push(...Object.values(gruposProd));
+
+  const gruposPecas = {};
+  pecasBoas.filter((p) => p.status === "Sucateada").forEach((p) => {
+    const key = (p.codigoPeca || "-") + "|" + p.descricao;
+    if (!gruposPecas[key]) gruposPecas[key] = { tipo: "Peça Sucateada (na Desmontagem)", codigo: p.codigoPeca || "-", descricao: p.descricao, quantidade: 0, valorPerdido: 0 };
+    gruposPecas[key].quantidade += p.quantidade;
+  });
+  linhas.push(...Object.values(gruposPecas));
+
+  return linhas.sort((a, b) => b.quantidade - a.quantidade);
+}
+
+const SUCATEIO_EXPORT_MAP = {
+  tipo: "Tipo", codigo: "Código", descricao: "Descrição", quantidade: "Quantidade", valorPerdido: "Valor_Perdido",
+};
+
+function gerarHtmlPecasBoas(db) {
+  const linhas = agruparPecasBoasDisponiveis(db.pecasBoas);
+  const totalUnidades = linhas.reduce((s, l) => s + l.quantidade, 0);
+  const totalValor = linhas.reduce((s, l) => s + l.valorTotal, 0);
+  const style = `
+    body{font-family:Arial,sans-serif;color:#333;margin:20px;}
+    .barra{background:#003D8D;color:#fff;padding:14px 18px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;}
+    .barra h1{font-size:16px;margin:0;} .barra p{font-size:11px;margin:2px 0 0;color:#BFD3EE;}
+    table{width:100%;border-collapse:collapse;font-size:11px;}
+    th,td{border:1px solid #999;padding:5px;text-align:left;}
+    th{background:#eef1f6;} td.num{text-align:right;}
+    tfoot td{font-weight:bold;border-top:2px solid #003D8D;}
+    @media print { @page { size: A4 portrait; margin: 12mm; } }
+  `;
+  let corpo = `<div class="barra"><div><h1>PENTÁGONO OUTLET DE ELETRODOMÉSTICOS</h1></div><div style="text-align:right"><h1>RELATÓRIO DE PEÇAS BOAS</h1><p>Gerado em ${todayStr()} — peças disponíveis, agrupadas por código</p></div></div>`;
+  corpo += `<table><thead><tr><th>Código</th><th>Descrição</th><th>Qtd.</th><th>Valor Unit.</th><th>Valor Total</th></tr></thead><tbody>`;
+  linhas.forEach((l) => {
+    corpo += `<tr><td>${l.codigoPeca}</td><td>${l.descricao}</td><td class="num">${l.quantidade}</td><td class="num">R$ ${l.valorUnitMedio.toFixed(2)}</td><td class="num">R$ ${l.valorTotal.toFixed(2)}</td></tr>`;
+  });
+  if (linhas.length === 0) corpo += `<tr><td colspan="5" style="text-align:center;color:#999;">Nenhuma peça disponível no momento.</td></tr>`;
+  corpo += `</tbody>`;
+  if (linhas.length > 0) corpo += `<tfoot><tr><td colspan="2">Total Geral</td><td class="num">${totalUnidades}</td><td></td><td class="num">R$ ${totalValor.toFixed(2)}</td></tr></tfoot>`;
+  corpo += `</table>`;
+  return `<html><head><title>Relatório de Peças Boas</title><style>${style}</style></head><body>${corpo}</body></html>`;
+}
+
+function gerarHtmlSucateio(db) {
+  const linhas = agruparSucateio(db.produtos, db.pecasBoas);
+  const totalUnidades = linhas.reduce((s, l) => s + l.quantidade, 0);
+  const totalValor = linhas.reduce((s, l) => s + l.valorPerdido, 0);
+  const style = `
+    body{font-family:Arial,sans-serif;color:#333;margin:20px;}
+    .barra{background:#003D8D;color:#fff;padding:14px 18px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;}
+    .barra h1{font-size:16px;margin:0;} .barra p{font-size:11px;margin:2px 0 0;color:#BFD3EE;}
+    table{width:100%;border-collapse:collapse;font-size:11px;}
+    th,td{border:1px solid #999;padding:5px;text-align:left;}
+    th{background:#eef1f6;} td.num{text-align:right;}
+    tfoot td{font-weight:bold;border-top:2px solid #003D8D;}
+    @media print { @page { size: A4 portrait; margin: 12mm; } }
+  `;
+  let corpo = `<div class="barra"><div><h1>PENTÁGONO OUTLET DE ELETRODOMÉSTICOS</h1></div><div style="text-align:right"><h1>RELATÓRIO DE SUCATEIO</h1><p>Gerado em ${todayStr()} — produtos descartados e peças sucateadas, agrupados por código</p></div></div>`;
+  corpo += `<table><thead><tr><th>Tipo</th><th>Código</th><th>Descrição</th><th>Qtd.</th><th>Valor Perdido</th></tr></thead><tbody>`;
+  linhas.forEach((l) => {
+    corpo += `<tr><td>${l.tipo}</td><td>${l.codigo}</td><td>${l.descricao}</td><td class="num">${l.quantidade}</td><td class="num">${l.valorPerdido ? "R$ " + l.valorPerdido.toFixed(2) : "-"}</td></tr>`;
+  });
+  if (linhas.length === 0) corpo += `<tr><td colspan="5" style="text-align:center;color:#999;">Nenhum item sucateado até agora.</td></tr>`;
+  corpo += `</tbody>`;
+  if (linhas.length > 0) corpo += `<tfoot><tr><td colspan="3">Total Geral</td><td class="num">${totalUnidades}</td><td class="num">R$ ${totalValor.toFixed(2)}</td></tr></tfoot>`;
+  corpo += `</table>`;
+  return `<html><head><title>Relatório de Sucateio</title><style>${style}</style></head><body>${corpo}</body></html>`;
+}
+
+function RelatorioPecasBoasImpresso({ db }) {
+  const linhas = agruparPecasBoasDisponiveis(db.pecasBoas);
+  const totalUnidades = linhas.reduce((s, l) => s + l.quantidade, 0);
+  const totalValor = linhas.reduce((s, l) => s + l.valorTotal, 0);
+  const tdDados = "border border-slate-300 px-1.5 py-1.5 text-slate-700";
+  return (
+    <div>
+      <ImpressoHeader title="RELATÓRIO DE PEÇAS BOAS" subtitle={`Gerado em ${todayStr()} — peças disponíveis, agrupadas por código`} />
+      <table className="w-full text-[10px] border-collapse border border-slate-400">
+        <thead>
+          <tr>
+            <th className={thCls}>Código</th>
+            <th className={thCls}>Descrição</th>
+            <th className={thCls + " w-16 text-right"}>Qtd.</th>
+            <th className={thCls + " w-24 text-right"}>Valor Unit.</th>
+            <th className={thCls + " w-24 text-right"}>Valor Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {linhas.map((l, i) => (
+            <tr key={i}>
+              <td className={tdDados + " font-mono"}>{l.codigoPeca}</td>
+              <td className={tdDados}>{l.descricao}</td>
+              <td className={tdDados + " text-right"}>{l.quantidade}</td>
+              <td className={tdDados + " text-right"}>R$ {l.valorUnitMedio.toFixed(2)}</td>
+              <td className={tdDados + " text-right font-semibold text-emerald-700"}>R$ {l.valorTotal.toFixed(2)}</td>
+            </tr>
+          ))}
+          {linhas.length === 0 && <tr><td colSpan={5} className="text-center py-4 text-slate-400 border border-slate-300">Nenhuma peça disponível no momento.</td></tr>}
+        </tbody>
+        {linhas.length > 0 && (
+          <tfoot>
+            <tr className="font-semibold">
+              <td className={tdDados} colSpan={2}>Total Geral</td>
+              <td className={tdDados + " text-right"}>{totalUnidades}</td>
+              <td className={tdDados}></td>
+              <td className={tdDados + " text-right text-emerald-700"}>R$ {totalValor.toFixed(2)}</td>
+            </tr>
+          </tfoot>
+        )}
+      </table>
+    </div>
+  );
+}
+
+function RelatorioSucateioImpresso({ db }) {
+  const linhas = agruparSucateio(db.produtos, db.pecasBoas);
+  const totalUnidades = linhas.reduce((s, l) => s + l.quantidade, 0);
+  const totalValor = linhas.reduce((s, l) => s + l.valorPerdido, 0);
+  const tdDados = "border border-slate-300 px-1.5 py-1.5 text-slate-700";
+  return (
+    <div>
+      <ImpressoHeader title="RELATÓRIO DE SUCATEIO" subtitle={`Gerado em ${todayStr()} — produtos descartados e peças sucateadas, agrupados por código`} />
+      <table className="w-full text-[10px] border-collapse border border-slate-400">
+        <thead>
+          <tr>
+            <th className={thCls}>Tipo</th>
+            <th className={thCls}>Código</th>
+            <th className={thCls}>Descrição</th>
+            <th className={thCls + " w-16 text-right"}>Qtd.</th>
+            <th className={thCls + " w-24 text-right"}>Valor Perdido</th>
+          </tr>
+        </thead>
+        <tbody>
+          {linhas.map((l, i) => (
+            <tr key={i}>
+              <td className={tdDados}>{l.tipo}</td>
+              <td className={tdDados + " font-mono"}>{l.codigo}</td>
+              <td className={tdDados}>{l.descricao}</td>
+              <td className={tdDados + " text-right"}>{l.quantidade}</td>
+              <td className={tdDados + " text-right font-semibold text-rose-700"}>{l.valorPerdido ? `R$ ${l.valorPerdido.toFixed(2)}` : "-"}</td>
+            </tr>
+          ))}
+          {linhas.length === 0 && <tr><td colSpan={5} className="text-center py-4 text-slate-400 border border-slate-300">Nenhum item sucateado até agora.</td></tr>}
+        </tbody>
+        {linhas.length > 0 && (
+          <tfoot>
+            <tr className="font-semibold">
+              <td className={tdDados} colSpan={3}>Total Geral</td>
+              <td className={tdDados + " text-right"}>{totalUnidades}</td>
+              <td className={tdDados + " text-right text-rose-700"}>R$ {totalValor.toFixed(2)}</td>
+            </tr>
+          </tfoot>
+        )}
+      </table>
+    </div>
+  );
+}
+
 function Imprimir({ db }) {
   const [formSel, setFormSel] = useState("recuperados");
   const [avisoPopup, setAvisoPopup] = useState(false);
   const opcoes = [
-    { id: "recuperados", label: "Relatório de Recuperados", status: "Recuperado", titulo: "RELATÓRIO DE PRODUTOS RECUPERADOS", exportMap: RECUPERADOS_EXPORT_MAP, arquivo: "relatorio_recuperados.csv" },
-    { id: "vendas", label: "Relatório de Vendas", status: "Vendido", titulo: "RELATÓRIO DE VENDAS", exportMap: VENDAS_EXPORT_MAP, arquivo: "relatorio_vendas.csv" },
+    { id: "recuperados", label: "Relatório de Recuperados", tipo: "financeiro", status: "Recuperado", titulo: "RELATÓRIO DE PRODUTOS RECUPERADOS", exportMap: RECUPERADOS_EXPORT_MAP, arquivo: "relatorio_recuperados.csv" },
+    { id: "vendas", label: "Relatório de Vendas", tipo: "financeiro", status: "Vendido", titulo: "RELATÓRIO DE VENDAS", exportMap: VENDAS_EXPORT_MAP, arquivo: "relatorio_vendas.csv" },
+    { id: "pecasboas", label: "Relatório de Peças Boas", tipo: "pecasboas", titulo: "RELATÓRIO DE PEÇAS BOAS", exportMap: PECASBOAS_EXPORT_MAP, arquivo: "relatorio_pecas_boas.csv" },
+    { id: "sucateio", label: "Relatório de Sucateio", tipo: "sucateio", titulo: "RELATÓRIO DE SUCATEIO", exportMap: SUCATEIO_EXPORT_MAP, arquivo: "relatorio_sucateio.csv" },
   ];
   const opcaoAtual = opcoes.find((o) => o.id === formSel);
 
+  function dadosParaExportar() {
+    if (opcaoAtual.tipo === "financeiro") return agruparPorStatusFinanceiro(db.produtos, opcaoAtual.status);
+    if (opcaoAtual.tipo === "pecasboas") return agruparPecasBoasDisponiveis(db.pecasBoas);
+    if (opcaoAtual.tipo === "sucateio") return agruparSucateio(db.produtos, db.pecasBoas);
+    return [];
+  }
+
+  function gerarHtml() {
+    if (opcaoAtual.tipo === "financeiro") return gerarHtmlPorStatus(db, opcaoAtual.status, opcaoAtual.titulo);
+    if (opcaoAtual.tipo === "pecasboas") return gerarHtmlPecasBoas(db);
+    if (opcaoAtual.tipo === "sucateio") return gerarHtmlSucateio(db);
+    return "<html><body>Sem dados</body></html>";
+  }
+
   function abrirParaImprimir() {
     setAvisoPopup(false);
-    const html = gerarHtmlPorStatus(db, opcaoAtual.status, opcaoAtual.titulo);
+    const html = gerarHtml();
     const win = window.open("", "_blank", "width=1000,height=700");
     if (!win) {
       setAvisoPopup(true);
@@ -3457,7 +3658,7 @@ function Imprimir({ db }) {
       <Card className="p-4 no-print">
         <h2 className="font-semibold mb-1">Relatórios</h2>
         <p className="text-sm text-slate-500 mb-3">
-          Todos os relatórios do sistema ficam aqui — com valores de custo, venda e lucro, prontos para visualizar, imprimir ou exportar.
+          Todos os relatórios do sistema ficam aqui — sempre agrupados por código, prontos para visualizar, imprimir ou exportar.
         </p>
         <div className="flex flex-wrap gap-2 mb-3">
           {opcoes.map((o) => (
@@ -3478,7 +3679,7 @@ function Imprimir({ db }) {
             <Printer size={16} /> Abrir em nova janela para imprimir
           </button>
           <button
-            onClick={() => downloadCSV(opcaoAtual.arquivo, mapRowsForExport(agruparPorStatusFinanceiro(db.produtos, opcaoAtual.status), opcaoAtual.exportMap))}
+            onClick={() => downloadCSV(opcaoAtual.arquivo, mapRowsForExport(dadosParaExportar(), opcaoAtual.exportMap))}
             className="text-sm border border-slate-300 rounded-lg px-4 py-2.5 hover:bg-slate-50 flex items-center gap-1.5"
           >
             <Download size={16} /> Baixar como CSV
@@ -3493,7 +3694,9 @@ function Imprimir({ db }) {
       </Card>
 
       <div className="print-page bg-white rounded-xl border border-slate-200 p-6">
-        <RelatorioFinanceiroImpresso db={db} status={opcaoAtual.status} titulo={opcaoAtual.titulo} />
+        {opcaoAtual.tipo === "financeiro" && <RelatorioFinanceiroImpresso db={db} status={opcaoAtual.status} titulo={opcaoAtual.titulo} />}
+        {opcaoAtual.tipo === "pecasboas" && <RelatorioPecasBoasImpresso db={db} />}
+        {opcaoAtual.tipo === "sucateio" && <RelatorioSucateioImpresso db={db} />}
       </div>
     </div>
   );
